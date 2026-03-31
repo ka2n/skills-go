@@ -193,7 +193,7 @@ func TestLockFileCompat(t *testing.T) {
   "dismissed": { "findSkillsPrompt": true },
   "lastSelectedAgents": ["claude-code", "cursor"]
 }`
-		got, err := skills.ReadGlobalLock(writeTemp(t, globalJSON))
+		got, err := skills.ReadGlobalLockFile(writeTemp(t, globalJSON))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -229,7 +229,7 @@ func TestLockFileCompat(t *testing.T) {
     }
   }
 }`
-		got, err := skills.ReadProjectLock(writeTemp(t, projectJSON))
+		got, err := skills.ReadProjectLockFile(writeTemp(t, projectJSON))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -427,9 +427,9 @@ func TestIntegrationInstallVercelSkills(t *testing.T) {
 	}
 
 	lockPath := skills.ProjectLockPath(projectDir)
-	lock.Write(lockPath)
+	lock.WriteFile(lockPath)
 
-	got, err := skills.ReadProjectLock(lockPath)
+	got, err := skills.ReadProjectLockFile(lockPath)
 	if err != nil {
 		t.Fatal(err)
 	}

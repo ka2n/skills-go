@@ -389,7 +389,7 @@ func installSkills(toInstall []*skills.Skill, targetAgents []skills.AgentType, i
 func cmdInstall(_ []string) {
 	cwd, _ := os.Getwd()
 	lockPath := skills.ProjectLockPath(cwd)
-	lock, err := skills.ReadProjectLock(lockPath)
+	lock, err := skills.ReadProjectLockFile(lockPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", lockPath, err)
 		os.Exit(1)
@@ -529,17 +529,17 @@ func cmdRemove(args []string) {
 
 	// Update lock files
 	if global {
-		lock, _ := skills.ReadGlobalLock(skills.GlobalLockPath(homeDir()))
+		lock, _ := skills.ReadGlobalLockFile(skills.GlobalLockPath(homeDir()))
 		for _, name := range toRemove {
 			lock.RemoveSkill(name)
 		}
-		lock.Write(skills.GlobalLockPath(homeDir()))
+		lock.WriteFile(skills.GlobalLockPath(homeDir()))
 	} else {
-		lock, _ := skills.ReadProjectLock(skills.ProjectLockPath(cwd))
+		lock, _ := skills.ReadProjectLockFile(skills.ProjectLockPath(cwd))
 		for _, name := range toRemove {
 			lock.RemoveSkill(name)
 		}
-		lock.Write(skills.ProjectLockPath(cwd))
+		lock.WriteFile(skills.ProjectLockPath(cwd))
 	}
 }
 
@@ -682,7 +682,7 @@ func cmdCheck(args []string) {
 	ctx := context.Background()
 
 	if global {
-		lock, err := skills.ReadGlobalLock(skills.GlobalLockPath(homeDir()))
+		lock, err := skills.ReadGlobalLockFile(skills.GlobalLockPath(homeDir()))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading global lock: %v\n", err)
 			os.Exit(1)
@@ -713,7 +713,7 @@ func cmdCheck(args []string) {
 
 	// Project scope (default)
 	cwd, _ := os.Getwd()
-	lock, err := skills.ReadProjectLock(skills.ProjectLockPath(cwd))
+	lock, err := skills.ReadProjectLockFile(skills.ProjectLockPath(cwd))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading project lock: %v\n", err)
 		os.Exit(1)
@@ -762,7 +762,7 @@ func cmdUpdate(args []string) {
 	fmt.Println("Checking for updates...")
 
 	if global {
-		lock, err := skills.ReadGlobalLock(skills.GlobalLockPath(homeDir()))
+		lock, err := skills.ReadGlobalLockFile(skills.GlobalLockPath(homeDir()))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading global lock: %v\n", err)
 			os.Exit(1)
@@ -788,7 +788,7 @@ func cmdUpdate(args []string) {
 			return
 		}
 		updated := printUpdateResults(results)
-		if err := lock.Write(skills.GlobalLockPath(homeDir())); err != nil {
+		if err := lock.WriteFile(skills.GlobalLockPath(homeDir())); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not write lock: %v\n", err)
 		}
 		fmt.Printf("\n✓ Updated %d skill(s)\n", updated)
@@ -797,7 +797,7 @@ func cmdUpdate(args []string) {
 
 	// Project scope (default)
 	cwd, _ := os.Getwd()
-	lock, err := skills.ReadProjectLock(skills.ProjectLockPath(cwd))
+	lock, err := skills.ReadProjectLockFile(skills.ProjectLockPath(cwd))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading project lock: %v\n", err)
 		os.Exit(1)
@@ -820,7 +820,7 @@ func cmdUpdate(args []string) {
 		return
 	}
 	updated := printUpdateResults(results)
-	if err := lock.Write(skills.ProjectLockPath(cwd)); err != nil {
+	if err := lock.WriteFile(skills.ProjectLockPath(cwd)); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not write lock: %v\n", err)
 	}
 	fmt.Printf("\n✓ Updated %d skill(s)\n", updated)

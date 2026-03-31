@@ -485,7 +485,7 @@ func WriteLockEntries(results []InstallResult, homeDir, projectDir string) error
 	}
 
 	if hasGlobal {
-		lock, err := ReadGlobalLock(GlobalLockPath(homeDir))
+		lock, err := ReadGlobalLockFile(GlobalLockPath(homeDir))
 		if err != nil {
 			return fmt.Errorf("reading global lock: %w", err)
 		}
@@ -502,13 +502,13 @@ func WriteLockEntries(results []InstallResult, homeDir, projectDir string) error
 				lock.SetSkill(name, *r.GlobalLockEntry)
 			}
 		}
-		if err := lock.Write(GlobalLockPath(homeDir)); err != nil {
+		if err := lock.WriteFile(GlobalLockPath(homeDir)); err != nil {
 			return fmt.Errorf("writing global lock: %w", err)
 		}
 	}
 
 	if hasProject {
-		lock, err := ReadProjectLock(ProjectLockPath(projectDir))
+		lock, err := ReadProjectLockFile(ProjectLockPath(projectDir))
 		if err != nil {
 			return fmt.Errorf("reading project lock: %w", err)
 		}
@@ -525,7 +525,7 @@ func WriteLockEntries(results []InstallResult, homeDir, projectDir string) error
 				lock.SetSkill(name, *r.ProjectLockEntry)
 			}
 		}
-		if err := lock.Write(ProjectLockPath(projectDir)); err != nil {
+		if err := lock.WriteFile(ProjectLockPath(projectDir)); err != nil {
 			return fmt.Errorf("writing project lock: %w", err)
 		}
 	}

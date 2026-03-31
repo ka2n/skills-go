@@ -3,6 +3,7 @@ package skills
 import (
 	"github.com/goccy/go-json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -63,13 +64,10 @@ func NewProjectLock() *ProjectLock {
 	}
 }
 
-// ReadGlobalLock reads the global lock file from the given path.
-func ReadGlobalLock(path string) (*GlobalLock, error) {
-	data, err := os.ReadFile(path)
+// ReadGlobalLock decodes a global lock from an io.Reader.
+func ReadGlobalLock(r io.Reader) (*GlobalLock, error) {
+	data, err := io.ReadAll(r)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return NewGlobalLock(), nil
-		}
 		return nil, fmt.Errorf("reading global lock: %w", err)
 	}
 	var lock GlobalLock
@@ -82,17 +80,42 @@ func ReadGlobalLock(path string) (*GlobalLock, error) {
 	return &lock, nil
 }
 
-// Write writes the global lock file to the given path.
-func (l *GlobalLock) Write(path string) error {
+// ReadGlobalLockFile reads the global lock file from the given path.
+func ReadGlobalLockFile(path string) (*GlobalLock, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return NewGlobalLock(), nil
+		}
+		return nil, fmt.Errorf("reading global lock: %w", err)
+	}
+	defer f.Close()
+	return ReadGlobalLock(f)
+}
+
+// WriteTo writes the global lock as JSON to an io.Writer.
+func (l *GlobalLock) WriteTo(w io.Writer) (int64, error) {
+	data, err := json.MarshalIndent(l, "", "  ")
+	if err != nil {
+		return 0, fmt.Errorf("marshaling global lock: %w", err)
+	}
+	data = append(data, '\n')
+	n, err := w.Write(data)
+	return int64(n), err
+}
+
+// WriteFile writes the global lock file to the given path.
+func (l *GlobalLock) WriteFile(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating lock directory: %w", err)
 	}
-	data, err := json.MarshalIndent(l, "", "  ")
+	f, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("marshaling global lock: %w", err)
+		return err
 	}
-	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
+	defer f.Close()
+	_, err = l.WriteTo(f)
+	return err
 }
 
 // SetSkill adds or updates a skill entry in the global lock.
@@ -116,13 +139,10 @@ func (l *GlobalLock) RemoveSkill(name string) {
 	delete(l.Skills, name)
 }
 
-// ReadProjectLock reads the project lock file from the given path.
-func ReadProjectLock(path string) (*ProjectLock, error) {
-	data, err := os.ReadFile(path)
+// ReadProjectLock decodes a project lock from an io.Reader.
+func ReadProjectLock(r io.Reader) (*ProjectLock, error) {
+	data, err := io.ReadAll(r)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return NewProjectLock(), nil
-		}
 		return nil, fmt.Errorf("reading project lock: %w", err)
 	}
 	var lock ProjectLock
@@ -135,17 +155,42 @@ func ReadProjectLock(path string) (*ProjectLock, error) {
 	return &lock, nil
 }
 
-// Write writes the project lock file to the given path.
-func (l *ProjectLock) Write(path string) error {
+// ReadProjectLockFile reads the project lock file from the given path.
+func ReadProjectLockFile(path string) (*ProjectLock, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return NewProjectLock(), nil
+		}
+		return nil, fmt.Errorf("reading project lock: %w", err)
+	}
+	defer f.Close()
+	return ReadProjectLock(f)
+}
+
+// WriteTo writes the project lock as JSON to an io.Writer.
+func (l *ProjectLock) WriteTo(w io.Writer) (int64, error) {
+	data, err := json.MarshalIndent(l, "", "  ")
+	if err != nil {
+		return 0, fmt.Errorf("marshaling project lock: %w", err)
+	}
+	data = append(data, '\n')
+	n, err := w.Write(data)
+	return int64(n), err
+}
+
+// WriteFile writes the project lock file to the given path.
+func (l *ProjectLock) WriteFile(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating lock directory: %w", err)
 	}
-	data, err := json.MarshalIndent(l, "", "  ")
+	f, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("marshaling project lock: %w", err)
+		return err
 	}
-	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
+	defer f.Close()
+	_, err = l.WriteTo(f)
+	return err
 }
 
 // SetSkill adds or updates a skill entry in the project lock.

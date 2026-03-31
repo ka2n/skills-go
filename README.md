@@ -40,7 +40,7 @@ results, _ := skills.InstallFromLocal("./my-skills",
 )
 
 // Restore from skills-lock.json (like npm install)
-lock, _ := skills.ReadProjectLock("skills-lock.json")
+lock, _ := skills.ReadProjectLockFile("skills-lock.json")
 results, _ = skills.RestoreFromProjectLock(ctx, lock,
     []skills.AgentType{skills.AgentClaudeCode},
     &skills.InstallOptions{
@@ -56,7 +56,7 @@ updates, _ := skills.CheckProjectUpdates(ctx, lock,
 )
 
 // Check for global skill updates
-globalLock, _ := skills.ReadGlobalLock(skills.GlobalLockPath(home))
+globalLock, _ := skills.ReadGlobalLockFile(skills.GlobalLockPath(home))
 updates, _ = skills.CheckUpdates(ctx, globalLock,
     &skills.InstallOptions{
         Providers: &skills.Providers{
