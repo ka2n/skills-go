@@ -26,121 +26,123 @@ go install github.com/ka2n/skills-go/cmd/skills@latest
 
 ## Library usage
 
-### High-level API
+### High-level API (`sk` package)
+
+The `sk` package provides one-step workflows with built-in providers.
+When `opts` is nil, [DefaultProviders](https://pkg.go.dev/github.com/ka2n/skills-go/sk#DefaultProviders) (git fetcher, GitHub hash provider, well-known endpoint support) is used automatically.
 
 ```go
-// Install all skills from a local directory
-results, _ := skills.InstallFromLocal("./my-skills",
-    []skills.AgentType{skills.AgentClaudeCode},
-    &skills.InstallFromLocalOptions{
-        InstallOptions: skills.InstallOptions{
-            Providers: &skills.Providers{Fetcher: &git.Fetcher{}},
-        },
-    },
+import (
+    skills "github.com/ka2n/skills-go"
+    "github.com/ka2n/skills-go/sk"
 )
+
+// Install from GitHub
+results, _ := sk.Install(ctx,
+    skills.SourceFrom("vercel-labs/agent-skills"),
+    []skills.AgentType{skills.AgentClaudeCode},
+    nil,
+)
+
+// Install from a local directory
+results, _ = sk.Install(ctx,
+    skills.SourceFromLocal("./my-skills"),
+    []skills.AgentType{skills.AgentClaudeCode},
+    nil,
+)
+
+// Install from an embedded filesystem
+//go:embed skills
+var skillsFS embed.FS
+
+results, _ = sk.Install(ctx,
+    skills.SourceFromFS(skillsFS),
+    []skills.AgentType{skills.AgentClaudeCode},
+    nil,
+)
+
+// Install and update project lock file
+results, _ = sk.Install(ctx,
+    skills.SourceFrom("owner/repo"),
+    []skills.AgentType{skills.AgentClaudeCode},
+    nil,
+)
+lock, _ := sk.ProjectLock(".")
+lock.ApplyResults(results)
+sk.WriteProjectLock(lock, ".")
 
 // Restore from skills-lock.json (like npm install)
-lock, _ := skills.ReadProjectLockFile("skills-lock.json")
-results, _ = skills.RestoreFromProjectLock(ctx, lock,
-    []skills.AgentType{skills.AgentClaudeCode},
-    &skills.InstallOptions{
-        Providers: &skills.Providers{Fetcher: &git.Fetcher{}},
-    },
-)
+lock, _ := sk.ProjectLock(".")
+sk.RestoreFromProjectLock(ctx, lock, agents, nil)
 
-// Check for project skill updates (works with any git source)
-updates, _ := skills.CheckProjectUpdates(ctx, lock,
-    &skills.InstallOptions{
-        Providers: &skills.Providers{Fetcher: &git.Fetcher{}},
-    },
-)
-
-// Check for global skill updates
-globalLock, _ := skills.ReadGlobalLockFile(skills.GlobalLockPath(home))
-updates, _ = skills.CheckUpdates(ctx, globalLock,
-    &skills.InstallOptions{
-        Providers: &skills.Providers{
-            HashProvider: &github.HashProvider{Token: github.AutoToken()},
-        },
-    },
-)
-
-// Reconcile: compare discovered skills vs installed state
-statuses, _ := skills.ReconcileSkills(discovered, skills.AgentClaudeCode, opts)
-for _, st := range statuses {
-    fmt.Printf("%s installed=%v update=%v\n", st.Name, st.Installed, st.UpdateAvailable)
+// Check for updates and apply them
+globalLock, _ := sk.GlobalLock()
+updates, _ := sk.CheckUpdates(ctx, globalLock, nil)
+if len(updates) > 0 {
+    sk.UpdateGlobal(ctx, globalLock, agents, nil)
+    sk.WriteGlobalLock(globalLock)
 }
 ```
 
-### Low-level API
+### Low-level API (`skills` package)
+
+The `skills` package provides composable primitives for custom workflows
+(e.g. custom storage backends for lock files, non-standard directory layouts).
 
 ```go
+import (
+    skills "github.com/ka2n/skills-go"
+    "github.com/ka2n/skills-go/provider/git"
+)
+
 // 1. Parse source — "owner/repo" is resolved to a GitHub git URL
 source, _ := skills.ParseSource("your-org/private-skills")
-// source.Type == skills.SourceGitHub
-// source.URL  == "https://github.com/your-org/private-skills.git"
 
 // 2. Clone — Fetcher downloads the repo to a temp directory
 fetcher := &git.Fetcher{}
-dir, cleanup, _ := fetcher.Fetch(context.Background(), source)
+dir, cleanup, _ := fetcher.Fetch(ctx, source)
 defer cleanup()
 
 // 3. Discover — find all SKILL.md files in the cloned repo
-found, _ := skills.DiscoverSkills(dir, "", nil)
+found, _ := skills.Discover(dir, "", nil)
 
 // 4. Install — copy/symlink into the agent's skills directory
-home := skills.UserHomeDir()
-opts := &skills.InstallOptions{
+home, _ := os.UserHomeDir()
+dest := &skills.DestOptions{
     Cwd:     ".",
     HomeDir: home,
     Agents:  skills.DefaultAgents(home),
 }
 for _, s := range found {
-    result := skills.InstallSkillForAgent(s, skills.AgentClaudeCode, opts)
+    result := skills.Install(s, skills.AgentClaudeCode, nil, dest)
     fmt.Println(result.Path)
 }
+
+// 5. Update lock — write to any io.Writer
+lock, _ := skills.ReadGlobalLockFile(skills.GlobalLockPath(home))
+lock.ApplyResults(results)
+lock.WriteTo(myCustomWriter) // S3, database, etc.
 ```
 
-### Custom source parsers
+### Custom providers
 
 ```go
-// Extend ParseSource to handle custom source formats (e.g. Azure DevOps)
-opts := &skills.InstallOptions{
+opts := &sk.InstallOptions{
     Providers: &skills.Providers{
-        Fetcher: myFetcher,
-        SourceParsers: []skills.SourceParser{
-            func(input string) (skills.ParsedSource, bool, error) {
-                if strings.HasPrefix(input, "azdo:") {
-                    // Parse Azure DevOps shorthand
-                    return skills.ParsedSource{
-                        Type: "azdo",
-                        URL:  "https://dev.azure.com/...",
-                    }, true, nil
-                }
-                return skills.ParsedSource{}, false, nil
-            },
+        Fetcher:      skills.MultiFetcher(&azdo.Fetcher{}, &wellknown.Fetcher{}, &git.Fetcher{}),
+        HashProvider: skills.MultiHashProvider(&azdo.HashProvider{}, &github.HashProvider{}),
+        SourceParser: func(input string) (skills.ParsedSource, bool, error) {
+            if strings.HasPrefix(input, "azdo:") {
+                return skills.ParsedSource{
+                    Type: "azdo",
+                    URL:  "https://dev.azure.com/...",
+                }, true, nil
+            }
+            return skills.ParsedSource{}, false, nil
         },
     },
 }
-```
-
-### Install from a local directory
-
-```go
-source, _ := skills.ParseSource("./my-skills")
-// source.Type == skills.SourceLocal — no clone needed
-found, _ := skills.DiscoverSkills(source.URL, "", nil)
-```
-
-### Install a specific skill by name
-
-```go
-source, _ := skills.ParseSource("your-org/repo@skill-name")
-// source.SkillFilter == "skill-name"
-
-// After discovery, filter by the requested name:
-found, _ := skills.DiscoverSkills(dir, "", nil)
-filtered := skills.FilterSkills(found, []string{source.SkillFilter})
+results, _ := sk.Install(ctx, skills.SourceFrom("azdo:my-project/repo"), agents, opts)
 ```
 
 ## Example CLI usage
@@ -280,23 +282,23 @@ Agents marked "Universal" share the `.agents/skills/` directory; others get syml
 
 ```
 github.com/ka2n/skills-go
-├── skill.go           # SKILL.md parsing, Skill/RemoteSkill types
+├── skill.go           # SKILL.md parsing, Skill type
+├── source.go          # Source type + source string parsing
 ├── agent.go           # Agent definitions (45+ agents)
-├── source.go          # Source string parsing (extensible via SourceParser)
 ├── discover.go        # Skill discovery (priority dirs + recursive)
-├── installer.go       # Install (symlink/copy), list, remove
-├── highlevel.go       # High-level APIs (InstallFromLocal, CheckUpdates, Restore, Reconcile)
+├── installer.go       # Install (symlink/copy), list, uninstall
 ├── hash.go            # Folder/content hashing (SHA-256)
-├── lock.go            # Lock file read/write (global v3, project v1)
-├── provider.go        # Fetcher/HashProvider/Providers interfaces
+├── lock.go            # Lock file read/write + ApplyResults
+├── provider.go        # Fetcher/HashProvider/Providers + Multi* combinators
 ├── plugin.go          # .claude-plugin manifest support
 ├── init.go            # SKILL.md template generation
+├── sk/                # High-level orchestration (Install, Update, Restore, Reconcile)
 ├── provider/
 │   ├── git/           # Fetcher — git clone (exec)
 │   ├── go-git/        # Fetcher — go-git v6 (pure Go, no git CLI)
 │   ├── github/        # HashProvider — GitHub Trees API + token resolution
 │   ├── local/         # Fetcher — local path + folder hashing
-│   └── wellknown/     # HostProvider — RFC 8615 well-known endpoint
+│   └── wellknown/     # Fetcher — RFC 8615 well-known endpoint
 └── cmd/
     └── skills/        # CLI
 ```
@@ -306,13 +308,16 @@ github.com/ka2n/skills-go
 Git is not a hard dependency. Core interfaces allow any backend:
 
 ```go
-// Bundle all providers for high-level APIs
 type Providers struct {
-    Fetcher       Fetcher        // retrieves skills from git-based sources
-    HashProvider  HashProvider   // checks remote hashes for global update detection
-    HostProviders *ProviderRegistry
-    SourceParsers []SourceParser // custom source format parsers
+    Fetcher      Fetcher        // retrieves skills from remote sources
+    HashProvider HashProvider   // checks remote hashes for update detection
+    SourceParser SourceParser   // custom source format parser
 }
+
+// Combine multiple implementations with Multi* constructors:
+// skills.MultiFetcher(&wellknown.Fetcher{}, &git.Fetcher{})
+// skills.MultiHashProvider(hp1, hp2)
+// skills.MultiSourceParser(parser1, parser2)
 
 type Fetcher interface {
     Fetch(ctx context.Context, source ParsedSource) (localDir string, cleanup func(), err error)
@@ -322,7 +327,6 @@ type HashProvider interface {
     FetchFolderHash(ctx context.Context, ownerRepo, skillPath string) (string, error)
 }
 
-// Extend source parsing for custom formats (Azure DevOps, Bitbucket, etc.)
 type SourceParser func(input string) (ParsedSource, bool, error)
 ```
 
@@ -334,7 +338,7 @@ Built-in providers:
 | `provider/go-git` | `Fetcher` | Pure Go clone (go-git v6) | nothing |
 | `provider/local` | `Fetcher` | Local filesystem path | nothing |
 | `provider/github` | `HashProvider` | GitHub Trees API (update check) | nothing |
-| `provider/wellknown` | `HostProvider` | RFC 8615 well-known endpoint | nothing |
+| `provider/wellknown` | `Fetcher` | RFC 8615 well-known endpoint | nothing |
 
 ## Lock file format
 

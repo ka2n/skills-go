@@ -590,12 +590,7 @@ func cmdInit(args []string) {
 		name = args[0]
 	}
 
-	dir := cwd
-	if name != "" {
-		dir = cwd // InitSkill handles subdirectory creation
-	}
-
-	path, err := skills.InitSkill(dir, name)
+	path, err := initSkill(cwd, name)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -606,6 +601,52 @@ func cmdInit(args []string) {
 	fmt.Println("\nNext steps:")
 	fmt.Println("  1. Edit the SKILL.md to define your skill instructions")
 	fmt.Println("  2. Update the name and description in the frontmatter")
+}
+
+func initSkill(dir string, name string) (string, error) {
+	if name == "" {
+		name = filepath.Base(dir)
+	}
+
+	skillDir := dir
+	if name != filepath.Base(dir) {
+		skillDir = filepath.Join(dir, name)
+	}
+	skillFile := filepath.Join(skillDir, "SKILL.md")
+
+	if _, err := os.Stat(skillFile); err == nil {
+		return "", fmt.Errorf("skill already exists at %s", skillFile)
+	}
+
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		return "", err
+	}
+
+	content := fmt.Sprintf(`---
+name: %s
+description: A brief description of what this skill does
+---
+
+# %s
+
+Instructions for the agent to follow when this skill is activated.
+
+## When to use
+
+Describe when this skill should be used.
+
+## Instructions
+
+1. First step
+2. Second step
+3. Additional steps as needed
+`, name, name)
+
+	if err := os.WriteFile(skillFile, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+
+	return skillFile, nil
 }
 
 // --- Check command ---

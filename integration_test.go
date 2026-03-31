@@ -334,18 +334,6 @@ func TestInstallSymlinkStructure(t *testing.T) {
 	}
 }
 
-func TestInitSkill(t *testing.T) {
-	tmp := t.TempDir()
-	path, err := skills.InitSkill(tmp, "my-new-skill")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := golden.Txtar(t, filepath.Dir(path))
-	if diff := golden.Check(t, flagUpdate, "testdata", t.Name(), got); diff != "" {
-		t.Errorf("init skill mismatch:\n%s", diff)
-	}
-}
-
 func TestComputeFolderHash(t *testing.T) {
 	tmp := t.TempDir()
 	os.WriteFile(filepath.Join(tmp, "SKILL.md"), []byte("test content"), 0o644)
