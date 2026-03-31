@@ -103,7 +103,7 @@ Remove Options:
   --all                  Remove all skills
 
 List Options:
-  -g, --global           List global skills
+  -g, --global           List global skills only
   --json                 Output as JSON
 
 Common Options:
@@ -558,17 +558,18 @@ func cmdList(args []string) {
 
 	allAgents := skills.DefaultAgents(homeDir())
 	cwd, _ := os.Getwd()
-	installOpts := &skills.InstallOptions{Global: global, Cwd: cwd, Agents: allAgents}
+	home := homeDir()
 
-	installed, err := skills.ListInstalledSkills(installOpts)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	var projectSkills, globalSkills []*skills.InstalledSkill
+	if global {
+		globalSkills, _ = skills.ListInstalledSkills(&skills.InstallOptions{Cwd: cwd, Agents: allAgents, Scope: skills.ScopeGlobal})
+	} else {
+		projectSkills, _ = skills.ListInstalledSkills(&skills.InstallOptions{Cwd: cwd, Agents: allAgents, Scope: skills.ScopeProject})
+		globalSkills, _ = skills.ListInstalledSkills(&skills.InstallOptions{Cwd: cwd, Agents: allAgents, Scope: skills.ScopeGlobal})
 	}
 
-	sort.Slice(installed, func(i, j int) bool {
-		return installed[i].Name < installed[j].Name
-	})
+	sort.Slice(projectSkills, func(i, j int) bool { return projectSkills[i].Name < projectSkills[j].Name })
+	sort.Slice(globalSkills, func(i, j int) bool { return globalSkills[i].Name < globalSkills[j].Name })
 
 	if jsonOutput {
 		type jsonSkill struct {
@@ -578,7 +579,7 @@ func cmdList(args []string) {
 			Agents []string `json:"agents"`
 		}
 		var out []jsonSkill
-		for _, s := range installed {
+		for _, s := range append(projectSkills, globalSkills...) {
 			agentNames := make([]string, len(s.Agents))
 			for i, a := range s.Agents {
 				if cfg, ok := allAgents[a]; ok {
@@ -594,38 +595,45 @@ func cmdList(args []string) {
 		return
 	}
 
-	if len(installed) == 0 {
-		scope := "project"
-		if global {
-			scope = "global"
-		}
-		fmt.Printf("No %s skills found.\n", scope)
+	if len(projectSkills) == 0 && len(globalSkills) == 0 {
+		fmt.Println("No skills found.")
 		return
 	}
 
-	home := homeDir()
-	for _, s := range installed {
-		path := s.CanonicalPath
-		if strings.HasPrefix(path, home) {
-			path = "~" + path[len(home):]
-		} else if strings.HasPrefix(path, cwd) {
-			path = "." + path[len(cwd):]
+	printSkillSection := func(title string, installed []*skills.InstalledSkill) {
+		if len(installed) == 0 {
+			return
 		}
+		fmt.Printf("%s:\n", title)
+		for _, s := range installed {
+			path := s.CanonicalPath
+			if strings.HasPrefix(path, home) {
+				path = "~" + path[len(home):]
+			} else if strings.HasPrefix(path, cwd) {
+				path = "." + path[len(cwd):]
+			}
 
-		agentNames := make([]string, len(s.Agents))
-		for i, a := range s.Agents {
-			if cfg, ok := allAgents[a]; ok {
-				agentNames[i] = cfg.DisplayName
-			} else {
-				agentNames[i] = a
+			agentNames := make([]string, len(s.Agents))
+			for i, a := range s.Agents {
+				if cfg, ok := allAgents[a]; ok {
+					agentNames[i] = cfg.DisplayName
+				} else {
+					agentNames[i] = a
+				}
+			}
+
+			fmt.Printf("  %s  \033[2m%s\033[0m\n", s.Name, path)
+			if len(agentNames) > 0 {
+				fmt.Printf("    Agents: %s\n", strings.Join(agentNames, ", "))
 			}
 		}
-
-		fmt.Printf("  %s  \033[2m%s\033[0m\n", s.Name, path)
-		if len(agentNames) > 0 {
-			fmt.Printf("    Agents: %s\n", strings.Join(agentNames, ", "))
-		}
 	}
+
+	printSkillSection("Project", projectSkills)
+	if len(projectSkills) > 0 && len(globalSkills) > 0 {
+		fmt.Println()
+	}
+	printSkillSection("Global", globalSkills)
 }
 
 func homeDir() string {
