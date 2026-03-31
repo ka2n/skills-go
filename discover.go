@@ -17,6 +17,13 @@ type DiscoverOptions struct {
 	// Agents is used to derive priority search directories from AgentConfig.SkillsDir.
 	// If nil, DefaultAgents(UserHomeDir()) is used.
 	Agents map[AgentType]AgentConfig
+	// OnParseError is called when a SKILL.md file cannot be parsed.
+	// If nil, parse errors are silently ignored (legacy behavior).
+	OnParseError func(path string, err error)
+	// OnDuplicate is called when a skill with the same name is found in multiple directories.
+	// path1 is the path of the first occurrence, path2 is the duplicate being skipped.
+	// If nil, duplicates are silently ignored (legacy behavior).
+	OnDuplicate func(name, path1, path2 string)
 }
 
 // DiscoverSkills finds all SKILL.md files in the given directory.
@@ -35,23 +42,36 @@ func DiscoverSkills(basePath string, subpath string, opts *DiscoverOptions) ([]*
 	}
 
 	var skills []*Skill
-	seen := map[string]bool{}
+	seenPaths := map[string]string{} // name -> first path
 
 	addSkill := func(s *Skill) {
-		if s == nil || seen[s.Name] {
+		if s == nil {
+			return
+		}
+		if firstPath, dup := seenPaths[s.Name]; dup {
+			if opts.OnDuplicate != nil {
+				opts.OnDuplicate(s.Name, firstPath, s.Path)
+			}
 			return
 		}
 		if s.Metadata.Internal && !opts.IncludeInternal && !shouldInstallInternalSkills() {
 			return
 		}
-		seen[s.Name] = true
+		seenPaths[s.Name] = s.Path
 		skills = append(skills, s)
+	}
+
+	tryParse := func(path string) *Skill {
+		s, err := parseSkillMd(path)
+		if err != nil && opts.OnParseError != nil {
+			opts.OnParseError(path, err)
+		}
+		return s
 	}
 
 	// If pointing directly at a skill directory
 	if hasSkillMd(searchPath) {
-		s, _ := parseSkillMd(filepath.Join(searchPath, "SKILL.md"))
-		addSkill(s)
+		addSkill(tryParse(filepath.Join(searchPath, "SKILL.md")))
 		if !opts.FullDepth {
 			return skills, nil
 		}
@@ -75,8 +95,7 @@ func DiscoverSkills(basePath string, subpath string, opts *DiscoverOptions) ([]*
 			}
 			skillDir := filepath.Join(dir, entry.Name())
 			if hasSkillMd(skillDir) {
-				s, _ := parseSkillMd(filepath.Join(skillDir, "SKILL.md"))
-				addSkill(s)
+				addSkill(tryParse(filepath.Join(skillDir, "SKILL.md")))
 			}
 		}
 	}
@@ -85,8 +104,7 @@ func DiscoverSkills(basePath string, subpath string, opts *DiscoverOptions) ([]*
 	if len(skills) == 0 || opts.FullDepth {
 		allDirs := findSkillDirs(searchPath, 0, 5)
 		for _, dir := range allDirs {
-			s, _ := parseSkillMd(filepath.Join(dir, "SKILL.md"))
-			addSkill(s)
+			addSkill(tryParse(filepath.Join(dir, "SKILL.md")))
 		}
 	}
 

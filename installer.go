@@ -30,6 +30,16 @@ type InstallResult struct {
 	Mode          InstallMode
 	SymlinkFailed bool
 	Error         string
+	// SkillName is the name of the skill that was installed.
+	SkillName string
+	// Err is the structured error (nil on success). Use this for errors.Is/As.
+	Err error
+	// SkippedFiles lists files that were skipped during remote install (e.g. unsafe paths).
+	SkippedFiles []string
+	// GlobalLockEntry is populated when a global install succeeds, for lock file updates.
+	GlobalLockEntry *GlobalLockEntry
+	// ProjectLockEntry is populated when a project install succeeds, for lock file updates.
+	ProjectLockEntry *ProjectLockEntry
 }
 
 // InstallOptions configures an install operation.
@@ -39,7 +49,30 @@ type InstallOptions struct {
 	HomeDir string
 	Mode    InstallMode
 	Agents  map[AgentType]AgentConfig
+	// Source is the parsed source used for this install, used to populate lock entries in InstallResult.
+	Source *ParsedSource
+	// FetchRoot is the root directory of the fetched source (e.g. the clone directory).
+	// Used to compute repo-relative skill paths for lock entries.
+	FetchRoot string
+	// Scope controls which scopes ListInstalledSkills searches.
+	// Default (ScopeAll) returns project+global when Global=false, global-only when Global=true.
+	Scope ListScope
+	// Providers bundles provider interfaces (Fetcher, HashProvider, SourceParsers).
+	// When set, high-level APIs use these instead of individual provider arguments.
+	Providers *Providers
 }
+
+// ListScope controls which scopes ListInstalledSkills returns.
+type ListScope int
+
+const (
+	// ScopeAll returns both project and global skills (default for backward compat).
+	ScopeAll ListScope = iota
+	// ScopeProject returns only project-scoped skills.
+	ScopeProject
+	// ScopeGlobal returns only globally-installed skills.
+	ScopeGlobal
+)
 
 func (o *InstallOptions) cwd() string {
 	if o.Cwd != "" {
@@ -129,6 +162,10 @@ func AgentBaseDir(agentType AgentType, agents map[AgentType]AgentConfig, global 
 	return filepath.Join(cwd, cfg.SkillsDir)
 }
 
+func installError(msg string, mode InstallMode) InstallResult {
+	return InstallResult{Error: msg, Err: fmt.Errorf("%s", msg), Mode: mode}
+}
+
 // InstallSkillForAgent installs a local skill for a single agent.
 func InstallSkillForAgent(skill *Skill, agentType AgentType, opts *InstallOptions) InstallResult {
 	if opts == nil {
@@ -137,11 +174,11 @@ func InstallSkillForAgent(skill *Skill, agentType AgentType, opts *InstallOption
 	agents := opts.agents()
 	cfg, ok := agents[agentType]
 	if !ok {
-		return InstallResult{Error: fmt.Sprintf("unknown agent: %s", agentType)}
+		return installError(fmt.Sprintf("unknown agent: %s", agentType), "")
 	}
 
 	if opts.Global && cfg.GlobalSkillsDir == "" {
-		return InstallResult{Error: fmt.Sprintf("%s does not support global installation", cfg.DisplayName), Mode: opts.mode()}
+		return installError(fmt.Sprintf("%s does not support global installation", cfg.DisplayName), opts.mode())
 	}
 
 	skillName := SanitizeName(skill.Name)
@@ -155,35 +192,41 @@ func InstallSkillForAgent(skill *Skill, agentType AgentType, opts *InstallOption
 	agentDir := filepath.Join(agentBase, skillName)
 
 	if !isPathSafe(canonicalBase, canonicalDir) || !isPathSafe(agentBase, agentDir) {
-		return InstallResult{Error: "invalid skill name: potential path traversal", Mode: mode}
+		return installError("invalid skill name: potential path traversal", mode)
+	}
+
+	buildResult := func(path, canonicalPath string, mode InstallMode, symlinkFailed bool) InstallResult {
+		r := InstallResult{Success: true, SkillName: skill.Name, Path: path, CanonicalPath: canonicalPath, Mode: mode, SymlinkFailed: symlinkFailed}
+		r.populateLockEntries(skill.Name, skill.Path, opts)
+		return r
 	}
 
 	if mode == InstallCopy {
 		if err := cleanAndCopyDir(skill.Path, agentDir); err != nil {
-			return InstallResult{Error: err.Error(), Mode: mode}
+			return installError(err.Error(), mode)
 		}
-		return InstallResult{Success: true, Path: agentDir, Mode: InstallCopy}
+		return buildResult(agentDir, "", InstallCopy, false)
 	}
 
 	// Symlink mode
 	if err := cleanAndCopyDir(skill.Path, canonicalDir); err != nil {
-		return InstallResult{Error: err.Error(), Mode: mode}
+		return installError(err.Error(), mode)
 	}
 
 	// Universal agents with global install: already in canonical dir
 	if opts.Global && IsUniversalAgent(agents, agentType) {
-		return InstallResult{Success: true, Path: canonicalDir, CanonicalPath: canonicalDir, Mode: InstallSymlink}
+		return buildResult(canonicalDir, canonicalDir, InstallSymlink, false)
 	}
 
 	if err := createSymlink(canonicalDir, agentDir); err != nil {
 		// Fallback to copy
 		if err := cleanAndCopyDir(skill.Path, agentDir); err != nil {
-			return InstallResult{Error: err.Error(), Mode: mode}
+			return installError(err.Error(), mode)
 		}
-		return InstallResult{Success: true, Path: agentDir, CanonicalPath: canonicalDir, Mode: InstallSymlink, SymlinkFailed: true}
+		return buildResult(agentDir, canonicalDir, InstallSymlink, true)
 	}
 
-	return InstallResult{Success: true, Path: agentDir, CanonicalPath: canonicalDir, Mode: InstallSymlink}
+	return buildResult(agentDir, canonicalDir, InstallSymlink, false)
 }
 
 // InstallRemoteSkillForAgent installs a remote skill (SKILL.md content) for a single agent.
@@ -194,11 +237,11 @@ func InstallRemoteSkillForAgent(skill *RemoteSkill, agentType AgentType, opts *I
 	agents := opts.agents()
 	cfg, ok := agents[agentType]
 	if !ok {
-		return InstallResult{Error: fmt.Sprintf("unknown agent: %s", agentType)}
+		return installError(fmt.Sprintf("unknown agent: %s", agentType), "")
 	}
 
 	if opts.Global && cfg.GlobalSkillsDir == "" {
-		return InstallResult{Error: fmt.Sprintf("%s does not support global installation", cfg.DisplayName), Mode: opts.mode()}
+		return installError(fmt.Sprintf("%s does not support global installation", cfg.DisplayName), opts.mode())
 	}
 
 	skillName := SanitizeName(skill.InstallName)
@@ -212,8 +255,10 @@ func InstallRemoteSkillForAgent(skill *RemoteSkill, agentType AgentType, opts *I
 	agentDir := filepath.Join(agentBase, skillName)
 
 	if !isPathSafe(canonicalBase, canonicalDir) || !isPathSafe(agentBase, agentDir) {
-		return InstallResult{Error: "invalid skill name: potential path traversal", Mode: mode}
+		return installError("invalid skill name: potential path traversal", mode)
 	}
+
+	var skippedFiles []string
 
 	writeFiles := func(targetDir string) error {
 		if err := os.RemoveAll(targetDir); err != nil {
@@ -229,6 +274,7 @@ func InstallRemoteSkillForAgent(skill *RemoteSkill, agentType AgentType, opts *I
 		for path, content := range files {
 			fullPath := filepath.Join(targetDir, path)
 			if !isPathSafe(targetDir, fullPath) {
+				skippedFiles = append(skippedFiles, path)
 				continue
 			}
 			if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
@@ -241,30 +287,42 @@ func InstallRemoteSkillForAgent(skill *RemoteSkill, agentType AgentType, opts *I
 		return nil
 	}
 
+	buildResult := func(path, canonicalPath string, mode InstallMode, symlinkFailed bool) InstallResult {
+		return InstallResult{
+			Success:       true,
+			SkillName:     skill.InstallName,
+			Path:          path,
+			CanonicalPath: canonicalPath,
+			Mode:          mode,
+			SymlinkFailed: symlinkFailed,
+			SkippedFiles:  skippedFiles,
+		}
+	}
+
 	if mode == InstallCopy {
 		if err := writeFiles(agentDir); err != nil {
-			return InstallResult{Error: err.Error(), Mode: mode}
+			return installError(err.Error(), mode)
 		}
-		return InstallResult{Success: true, Path: agentDir, Mode: InstallCopy}
+		return buildResult(agentDir, "", InstallCopy, false)
 	}
 
 	// Symlink mode
 	if err := writeFiles(canonicalDir); err != nil {
-		return InstallResult{Error: err.Error(), Mode: mode}
+		return installError(err.Error(), mode)
 	}
 
 	if opts.Global && IsUniversalAgent(agents, agentType) {
-		return InstallResult{Success: true, Path: canonicalDir, CanonicalPath: canonicalDir, Mode: InstallSymlink}
+		return buildResult(canonicalDir, canonicalDir, InstallSymlink, false)
 	}
 
 	if err := createSymlink(canonicalDir, agentDir); err != nil {
 		if err := writeFiles(agentDir); err != nil {
-			return InstallResult{Error: err.Error(), Mode: mode}
+			return installError(err.Error(), mode)
 		}
-		return InstallResult{Success: true, Path: agentDir, CanonicalPath: canonicalDir, Mode: InstallSymlink, SymlinkFailed: true}
+		return buildResult(agentDir, canonicalDir, InstallSymlink, true)
 	}
 
-	return InstallResult{Success: true, Path: agentDir, CanonicalPath: canonicalDir, Mode: InstallSymlink}
+	return buildResult(agentDir, canonicalDir, InstallSymlink, false)
 }
 
 // RemoveSkill removes a skill from all specified agents.
@@ -280,7 +338,10 @@ func RemoveSkill(skillName string, agentTypes []AgentType, opts *InstallOptions)
 	canonicalPath := filepath.Join(CanonicalSkillsDir(opts.Global, cwd, home), sanitized)
 
 	for _, agentType := range agentTypes {
-		cfg := agents[agentType]
+		cfg, ok := agents[agentType]
+		if !ok {
+			return fmt.Errorf("unknown agent: %s", agentType)
+		}
 		var agentDir string
 		if opts.Global && cfg.GlobalSkillsDir != "" {
 			agentDir = filepath.Join(cfg.GlobalSkillsDir, sanitized)
@@ -297,6 +358,9 @@ func RemoveSkill(skillName string, agentTypes []AgentType, opts *InstallOptions)
 }
 
 // ListInstalledSkills lists all installed skills from canonical and agent directories.
+// The scope can be controlled via opts.Scope (ScopeAll by default, which returns both
+// project and global when opts.Global is false, or global-only when opts.Global is true).
+// For explicit control, set opts.Scope to ScopeProject, ScopeGlobal, or ScopeAll.
 func ListInstalledSkills(opts *InstallOptions) ([]*InstalledSkill, error) {
 	if opts == nil {
 		opts = &InstallOptions{}
@@ -327,9 +391,17 @@ func ListInstalledSkills(opts *InstallOptions) ([]*InstalledSkill, error) {
 		global bool
 	}
 	var scopes []scopeDef
-	if opts.Global {
+	scope := opts.Scope
+	if scope == ScopeAll && opts.Global {
+		// Legacy behavior: Global=true with default scope means global-only
+		scope = ScopeGlobal
+	}
+	switch scope {
+	case ScopeGlobal:
 		scopes = []scopeDef{{global: true}}
-	} else {
+	case ScopeProject:
+		scopes = []scopeDef{{global: false}}
+	default: // ScopeAll
 		scopes = []scopeDef{{global: false}, {global: true}}
 	}
 
@@ -390,6 +462,7 @@ func ListInstalledSkills(opts *InstallOptions) ([]*InstalledSkill, error) {
 					Path:          skillDir,
 					CanonicalPath: skillDir,
 					Scope:         scope,
+					DirName:       entry.Name(),
 				}
 				if target.agentType != "" {
 					is.AddAgent(target.agentType)
@@ -414,6 +487,15 @@ type InstalledSkill struct {
 	CanonicalPath string      `json:"canonicalPath"`
 	Scope         string      `json:"scope"`
 	Agents        []AgentType `json:"agents"`
+	// DirName is the actual directory name on disk. If it differs from
+	// SanitizeName(Name), the install path has diverged from the frontmatter name.
+	DirName string `json:"dirName,omitempty"`
+}
+
+// NameDiverged returns true if the on-disk directory name differs from what
+// SanitizeName would produce for the skill's frontmatter name.
+func (is *InstalledSkill) NameDiverged() bool {
+	return is.DirName != "" && is.DirName != SanitizeName(is.Name)
 }
 
 // AddAgent adds an agent to the installed skill if not already present.
@@ -424,6 +506,57 @@ func (is *InstalledSkill) AddAgent(t AgentType) {
 		}
 	}
 	is.Agents = append(is.Agents, t)
+}
+
+// populateLockEntries fills lock entry fields on a successful InstallResult based on InstallOptions.Source.
+func (r *InstallResult) populateLockEntries(skillName, skillPath string, opts *InstallOptions) {
+	if opts.Source == nil {
+		return
+	}
+	ownerRepo := GetOwnerRepo(*opts.Source)
+	lockSource := ownerRepo
+	if lockSource == "" {
+		lockSource = opts.Source.URL
+	}
+	sourceType := string(opts.Source.Type)
+
+	// Compute repo-relative skill path for lock entries.
+	// FetchRoot is the clone directory; skillPath is absolute within it.
+	repoRelSkillPath := skillPath
+	if opts.FetchRoot != "" {
+		if rel, err := filepath.Rel(opts.FetchRoot, skillPath); err == nil {
+			repoRelSkillPath = rel
+		}
+	}
+
+	if opts.Global {
+		r.GlobalLockEntry = &GlobalLockEntry{
+			Source:     lockSource,
+			SourceType: sourceType,
+			SourceURL:  opts.Source.URL,
+			SkillPath:  filepath.Join(repoRelSkillPath, "SKILL.md"),
+		}
+	} else {
+		r.ProjectLockEntry = &ProjectLockEntry{
+			Source:     lockSource,
+			SourceType: sourceType,
+		}
+	}
+}
+
+// ResolveSkillInstallPath returns the directory where a skill would be installed
+// for the given agent type and options, without actually installing anything.
+func ResolveSkillInstallPath(skillName string, agentType AgentType, opts *InstallOptions) (string, error) {
+	if opts == nil {
+		opts = &InstallOptions{}
+	}
+	agents := opts.agents()
+	if _, ok := agents[agentType]; !ok {
+		return "", fmt.Errorf("unknown agent: %s", agentType)
+	}
+	sanitized := SanitizeName(skillName)
+	base := AgentBaseDir(agentType, agents, opts.Global, opts.cwd(), opts.homeDir())
+	return filepath.Join(base, sanitized), nil
 }
 
 func isPathSafe(basePath, targetPath string) bool {
@@ -468,11 +601,56 @@ func createSymlink(target, linkPath string) error {
 }
 
 var excludeFiles = map[string]bool{"metadata.json": true}
-var excludeDirs = map[string]bool{".git": true, "__pycache__": true, "__pypackages__": true}
+var excludeDirs = map[string]bool{
+	".git":            true,
+	".svn":            true,
+	".hg":             true,
+	"__pycache__":     true,
+	"__pypackages__":  true,
+	"node_modules":    true,
+}
 
 func cleanAndCopyDir(src, dest string) error {
-	os.RemoveAll(dest)
-	return copyDirectory(src, dest)
+	// Copy to a temporary directory in the same parent, then swap in.
+	// This minimizes the window where dest does not exist.
+	parent := filepath.Dir(dest)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return err
+	}
+	tmpNew, err := os.MkdirTemp(parent, ".skill-install-*")
+	if err != nil {
+		return fmt.Errorf("creating temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpNew) // clean up on any failure path
+
+	if err := copyDirectory(src, tmpNew); err != nil {
+		return err
+	}
+
+	// Move old dest aside (if it exists), rename new in, then remove old.
+	tmpOld := dest + ".old"
+	hasOld := false
+	if _, err := os.Stat(dest); err == nil {
+		if err := os.Rename(dest, tmpOld); err != nil {
+			// Fallback: remove dest directly if rename fails
+			os.RemoveAll(dest)
+		} else {
+			hasOld = true
+		}
+	}
+
+	if err := os.Rename(tmpNew, dest); err != nil {
+		// Restore old if rename failed
+		if hasOld {
+			os.Rename(tmpOld, dest)
+		}
+		return fmt.Errorf("rename: %w", err)
+	}
+
+	if hasOld {
+		os.RemoveAll(tmpOld)
+	}
+	return nil
 }
 
 func copyDirectory(src, dest string) error {
@@ -485,12 +663,12 @@ func copyDirectory(src, dest string) error {
 		}
 		name := d.Name()
 		if d.IsDir() {
-			if excludeDirs[name] || strings.HasPrefix(name, ".") {
+			if excludeDirs[name] {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if excludeFiles[name] || strings.HasPrefix(name, ".") {
+		if excludeFiles[name] {
 			return nil
 		}
 

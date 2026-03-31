@@ -26,6 +26,9 @@ type Skill struct {
 	Description string `yaml:"description" json:"description"`
 	// Metadata contains optional fields.
 	Metadata SkillMetadata `yaml:"metadata,omitempty" json:"metadata,omitempty"`
+	// RawFrontmatter preserves all frontmatter fields (including unknown ones like
+	// allowed-tools, disable-model-invocation) for round-trip fidelity in Marshal().
+	RawFrontmatter map[string]any `yaml:"-" json:"-"`
 	// Body is the markdown content after the frontmatter.
 	Body string `yaml:"-" json:"-"`
 	// RawContent is the original SKILL.md content for hashing.
@@ -75,6 +78,12 @@ func ParseSkillBytes(data []byte) (*Skill, error) {
 		return nil, fmt.Errorf("parsing skill frontmatter YAML: %w", err)
 	}
 
+	// Capture all frontmatter fields (including unknown ones) for round-trip fidelity.
+	var raw map[string]any
+	if err := yaml.Unmarshal(frontmatter, &raw); err == nil {
+		s.RawFrontmatter = raw
+	}
+
 	if s.Name == "" {
 		return nil, fmt.Errorf("skill name is required")
 	}
@@ -97,16 +106,23 @@ func ParseSkillFile(path string) (*Skill, error) {
 }
 
 // Marshal serializes a Skill back to SKILL.md format (YAML frontmatter + markdown body).
+// Unknown frontmatter fields from the original parse are preserved.
 func (s *Skill) Marshal() ([]byte, error) {
-	fm, err := yaml.Marshal(struct {
-		Name        string         `yaml:"name"`
-		Description string         `yaml:"description"`
-		Metadata    *SkillMetadata `yaml:"metadata,omitempty"`
-	}{
-		Name:        s.Name,
-		Description: s.Description,
-		Metadata:    omitEmptyMetadata(&s.Metadata),
-	})
+	// Start with raw frontmatter to preserve unknown fields.
+	merged := make(map[string]any)
+	for k, v := range s.RawFrontmatter {
+		merged[k] = v
+	}
+	// Overwrite known fields with current values.
+	merged["name"] = s.Name
+	merged["description"] = s.Description
+	if m := omitEmptyMetadata(&s.Metadata); m != nil {
+		merged["metadata"] = m
+	} else {
+		delete(merged, "metadata")
+	}
+
+	fm, err := yaml.Marshal(merged)
 	if err != nil {
 		return nil, err
 	}
