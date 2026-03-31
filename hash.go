@@ -64,6 +64,56 @@ func ComputeFolderHash(dir string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
+// ComputeFolderHashFS computes a SHA-256 hash from all files in a directory within an fs.FS.
+// Files are sorted by relative path for deterministic output.
+// Directories named .git and node_modules are skipped.
+func ComputeFolderHashFS(fsys fs.FS, dir string) (string, error) {
+	type fileEntry struct {
+		relativePath string
+		content      []byte
+	}
+	var files []fileEntry
+
+	err := fs.WalkDir(fsys, dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if name == ".git" || name == "node_modules" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		content, err := fs.ReadFile(fsys, path)
+		if err != nil {
+			return err
+		}
+		rel := strings.TrimPrefix(path, dir)
+		rel = strings.TrimPrefix(rel, "/")
+		if rel == "" {
+			return nil
+		}
+		files = append(files, fileEntry{relativePath: rel, content: content})
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].relativePath < files[j].relativePath
+	})
+
+	h := sha256.New()
+	for _, f := range files {
+		h.Write([]byte(f.relativePath))
+		h.Write(f.content)
+	}
+
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
 // ComputeContentHash computes a SHA-256 hash of a string.
 func ComputeContentHash(content string) string {
 	h := sha256.Sum256([]byte(content))

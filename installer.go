@@ -42,32 +42,33 @@ type InstallResult struct {
 	ProjectLockEntry *ProjectLockEntry
 }
 
-// InstallOptions configures an install operation.
-type InstallOptions struct {
+// DestOptions configures where and how skills are installed.
+type DestOptions struct {
 	Global  bool
 	Cwd     string
 	HomeDir string
 	Mode    InstallMode
 	Agents  map[AgentType]AgentConfig
-	// SourceFS is the source filesystem for reading skill files.
+	// Scope controls which scopes ListInstalled searches.
+	// Default (ScopeAll) returns project+global when Global=false, global-only when Global=true.
+	Scope ListScope
+}
+
+// SourceRef describes where a skill comes from.
+type SourceRef struct {
+	// FS is the source filesystem for reading skill files.
 	// When set, skill.Path is treated as an FS-relative path and files are read
-	// from SourceFS instead of the OS filesystem. Writing still goes to the OS.
+	// from FS instead of the OS filesystem. Writing still goes to the OS.
 	// If nil, skill.Path is treated as an OS absolute path (backward compat).
-	SourceFS fs.FS
-	// Source is the parsed source used for this install, used to populate lock entries in InstallResult.
-	Source *ParsedSource
+	FS fs.FS
+	// Parsed is the parsed source used for this install, used to populate lock entries in InstallResult.
+	Parsed *ParsedSource
 	// FetchRoot is the root directory of the fetched source (e.g. the clone directory).
 	// Used to compute repo-relative skill paths for lock entries.
 	FetchRoot string
-	// Scope controls which scopes ListInstalledSkills searches.
-	// Default (ScopeAll) returns project+global when Global=false, global-only when Global=true.
-	Scope ListScope
-	// Providers bundles provider interfaces (Fetcher, HashProvider, SourceParsers).
-	// When set, high-level APIs use these instead of individual provider arguments.
-	Providers *Providers
 }
 
-// ListScope controls which scopes ListInstalledSkills returns.
+// ListScope controls which scopes ListInstalled returns.
 type ListScope int
 
 const (
@@ -79,7 +80,7 @@ const (
 	ScopeGlobal
 )
 
-func (o *InstallOptions) cwd() string {
+func (o *DestOptions) cwd() string {
 	if o.Cwd != "" {
 		return o.Cwd
 	}
@@ -87,21 +88,21 @@ func (o *InstallOptions) cwd() string {
 	return cwd
 }
 
-func (o *InstallOptions) homeDir() string {
+func (o *DestOptions) homeDir() string {
 	if o.HomeDir != "" {
 		return o.HomeDir
 	}
-	return UserHomeDir()
+	return userHomeDir()
 }
 
-func (o *InstallOptions) agents() map[AgentType]AgentConfig {
+func (o *DestOptions) agents() map[AgentType]AgentConfig {
 	if o.Agents != nil {
 		return o.Agents
 	}
 	return DefaultAgents(o.homeDir())
 }
 
-func (o *InstallOptions) mode() InstallMode {
+func (o *DestOptions) mode() InstallMode {
 	if o.Mode != "" {
 		return o.Mode
 	}
@@ -139,9 +140,7 @@ func SanitizeName(name string) string {
 	return sanitized
 }
 
-// CanonicalSkillsDir returns the canonical .agents/skills directory.
-// homeDir is the user's home directory (used when global is true).
-func CanonicalSkillsDir(global bool, cwd, homeDir string) string {
+func canonicalSkillsDir(global bool, cwd, homeDir string) string {
 	var baseDir string
 	if global {
 		baseDir = homeDir
@@ -151,11 +150,9 @@ func CanonicalSkillsDir(global bool, cwd, homeDir string) string {
 	return filepath.Join(baseDir, AgentsDir, SkillsSubdir)
 }
 
-// AgentBaseDir returns the base skills directory for an agent.
-// homeDir is the user's home directory (used when global is true).
-func AgentBaseDir(agentType AgentType, agents map[AgentType]AgentConfig, global bool, cwd, homeDir string) string {
-	if IsUniversalAgent(agents, agentType) {
-		return CanonicalSkillsDir(global, cwd, homeDir)
+func agentBaseDir(agentType AgentType, agents map[AgentType]AgentConfig, global bool, cwd, homeDir string) string {
+	if isUniversalAgent(agents, agentType) {
+		return canonicalSkillsDir(global, cwd, homeDir)
 	}
 	cfg := agents[agentType]
 	if global {
@@ -171,100 +168,31 @@ func installError(msg string, mode InstallMode) InstallResult {
 	return InstallResult{Error: msg, Err: fmt.Errorf("%s", msg), Mode: mode}
 }
 
-// InstallSkillForAgent installs a local skill for a single agent.
-func InstallSkillForAgent(skill *Skill, agentType AgentType, opts *InstallOptions) InstallResult {
-	if opts == nil {
-		opts = &InstallOptions{}
+// Install installs a skill for a single agent.
+// If skill.Files is set, the in-memory file contents are written to disk.
+// Otherwise, the skill directory at skill.Path is copied (or symlinked).
+func Install(skill *Skill, agentType AgentType, src *SourceRef, dest *DestOptions) InstallResult {
+	if dest == nil {
+		dest = &DestOptions{}
 	}
-	agents := opts.agents()
+	agents := dest.agents()
 	cfg, ok := agents[agentType]
 	if !ok {
 		return installError(fmt.Sprintf("unknown agent: %s", agentType), "")
 	}
 
-	if opts.Global && cfg.GlobalSkillsDir == "" {
-		return installError(fmt.Sprintf("%s does not support global installation", cfg.DisplayName), opts.mode())
+	if dest.Global && cfg.GlobalSkillsDir == "" {
+		return installError(fmt.Sprintf("%s does not support global installation", cfg.DisplayName), dest.mode())
 	}
 
 	skillName := SanitizeName(skill.Name)
-	cwd := opts.cwd()
-	mode := opts.mode()
+	cwd := dest.cwd()
+	mode := dest.mode()
+	home := dest.homeDir()
 
-	home := opts.homeDir()
-	canonicalBase := CanonicalSkillsDir(opts.Global, cwd, home)
+	canonicalBase := canonicalSkillsDir(dest.Global, cwd, home)
 	canonicalDir := filepath.Join(canonicalBase, skillName)
-	agentBase := AgentBaseDir(agentType, agents, opts.Global, cwd, home)
-	agentDir := filepath.Join(agentBase, skillName)
-
-	if !isPathSafe(canonicalBase, canonicalDir) || !isPathSafe(agentBase, agentDir) {
-		return installError("invalid skill name: potential path traversal", mode)
-	}
-
-	buildResult := func(path, canonicalPath string, mode InstallMode, symlinkFailed bool) InstallResult {
-		r := InstallResult{Success: true, SkillName: skill.Name, Path: path, CanonicalPath: canonicalPath, Mode: mode, SymlinkFailed: symlinkFailed}
-		r.populateLockEntries(skill.Name, skill.Path, opts)
-		return r
-	}
-
-	// Choose copy function based on whether SourceFS is set
-	copyDir := func(src, dest string) error {
-		if opts.SourceFS != nil {
-			return cleanAndCopyDirFS(opts.SourceFS, src, dest)
-		}
-		return cleanAndCopyDir(src, dest)
-	}
-
-	if mode == InstallCopy {
-		if err := copyDir(skill.Path, agentDir); err != nil {
-			return installError(err.Error(), mode)
-		}
-		return buildResult(agentDir, "", InstallCopy, false)
-	}
-
-	// Symlink mode
-	if err := copyDir(skill.Path, canonicalDir); err != nil {
-		return installError(err.Error(), mode)
-	}
-
-	// Universal agents with global install: already in canonical dir
-	if opts.Global && IsUniversalAgent(agents, agentType) {
-		return buildResult(canonicalDir, canonicalDir, InstallSymlink, false)
-	}
-
-	if err := createSymlink(canonicalDir, agentDir); err != nil {
-		// Fallback to copy
-		if err := copyDir(skill.Path, agentDir); err != nil {
-			return installError(err.Error(), mode)
-		}
-		return buildResult(agentDir, canonicalDir, InstallSymlink, true)
-	}
-
-	return buildResult(agentDir, canonicalDir, InstallSymlink, false)
-}
-
-// InstallRemoteSkillForAgent installs a remote skill (SKILL.md content) for a single agent.
-func InstallRemoteSkillForAgent(skill *RemoteSkill, agentType AgentType, opts *InstallOptions) InstallResult {
-	if opts == nil {
-		opts = &InstallOptions{}
-	}
-	agents := opts.agents()
-	cfg, ok := agents[agentType]
-	if !ok {
-		return installError(fmt.Sprintf("unknown agent: %s", agentType), "")
-	}
-
-	if opts.Global && cfg.GlobalSkillsDir == "" {
-		return installError(fmt.Sprintf("%s does not support global installation", cfg.DisplayName), opts.mode())
-	}
-
-	skillName := SanitizeName(skill.InstallName)
-	cwd := opts.cwd()
-	mode := opts.mode()
-	home := opts.homeDir()
-
-	canonicalBase := CanonicalSkillsDir(opts.Global, cwd, home)
-	canonicalDir := filepath.Join(canonicalBase, skillName)
-	agentBase := AgentBaseDir(agentType, agents, opts.Global, cwd, home)
+	agentBase := agentBaseDir(agentType, agents, dest.Global, cwd, home)
 	agentDir := filepath.Join(agentBase, skillName)
 
 	if !isPathSafe(canonicalBase, canonicalDir) || !isPathSafe(agentBase, agentDir) {
@@ -273,6 +201,7 @@ func InstallRemoteSkillForAgent(skill *RemoteSkill, agentType AgentType, opts *I
 
 	var skippedFiles []string
 
+	// writeFiles writes in-memory file contents to targetDir (for skills with Files set).
 	writeFiles := func(targetDir string) error {
 		if err := os.RemoveAll(targetDir); err != nil {
 			return err
@@ -282,12 +211,12 @@ func InstallRemoteSkillForAgent(skill *RemoteSkill, agentType AgentType, opts *I
 		}
 		files := skill.Files
 		if files == nil {
-			files = map[string]string{"SKILL.md": skill.Content}
+			files = map[string]string{"SKILL.md": skill.RawContent}
 		}
-		for path, content := range files {
-			fullPath := filepath.Join(targetDir, path)
+		for p, content := range files {
+			fullPath := filepath.Join(targetDir, p)
 			if !isPathSafe(targetDir, fullPath) {
-				skippedFiles = append(skippedFiles, path)
+				skippedFiles = append(skippedFiles, p)
 				continue
 			}
 			if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
@@ -300,36 +229,55 @@ func InstallRemoteSkillForAgent(skill *RemoteSkill, agentType AgentType, opts *I
 		return nil
 	}
 
+	// copyDir copies the skill directory from the source.
+	copyDir := func(srcPath, destPath string) error {
+		if src != nil && src.FS != nil {
+			return cleanAndCopyDirFS(src.FS, srcPath, destPath)
+		}
+		return cleanAndCopyDir(srcPath, destPath)
+	}
+
+	// materialize picks the right strategy: writeFiles for in-memory, copyDir for on-disk.
+	materialize := func(targetDir string) error {
+		if skill.Files != nil {
+			return writeFiles(targetDir)
+		}
+		return copyDir(skill.Path, targetDir)
+	}
+
 	buildResult := func(path, canonicalPath string, mode InstallMode, symlinkFailed bool) InstallResult {
-		return InstallResult{
+		r := InstallResult{
 			Success:       true,
-			SkillName:     skill.InstallName,
+			SkillName:     skill.Name,
 			Path:          path,
 			CanonicalPath: canonicalPath,
 			Mode:          mode,
 			SymlinkFailed: symlinkFailed,
 			SkippedFiles:  skippedFiles,
 		}
+		r.populateLockEntries(skill.Name, skill.Path, dest, src)
+		return r
 	}
 
 	if mode == InstallCopy {
-		if err := writeFiles(agentDir); err != nil {
+		if err := materialize(agentDir); err != nil {
 			return installError(err.Error(), mode)
 		}
 		return buildResult(agentDir, "", InstallCopy, false)
 	}
 
 	// Symlink mode
-	if err := writeFiles(canonicalDir); err != nil {
+	if err := materialize(canonicalDir); err != nil {
 		return installError(err.Error(), mode)
 	}
 
-	if opts.Global && IsUniversalAgent(agents, agentType) {
+	if dest.Global && isUniversalAgent(agents, agentType) {
 		return buildResult(canonicalDir, canonicalDir, InstallSymlink, false)
 	}
 
 	if err := createSymlink(canonicalDir, agentDir); err != nil {
-		if err := writeFiles(agentDir); err != nil {
+		// Fallback to copy
+		if err := materialize(agentDir); err != nil {
 			return installError(err.Error(), mode)
 		}
 		return buildResult(agentDir, canonicalDir, InstallSymlink, true)
@@ -338,17 +286,17 @@ func InstallRemoteSkillForAgent(skill *RemoteSkill, agentType AgentType, opts *I
 	return buildResult(agentDir, canonicalDir, InstallSymlink, false)
 }
 
-// RemoveSkill removes a skill from all specified agents.
-func RemoveSkill(skillName string, agentTypes []AgentType, opts *InstallOptions) error {
-	if opts == nil {
-		opts = &InstallOptions{}
+// Remove removes a skill from all specified agents.
+func Uninstall(skillName string, agentTypes []AgentType, dest *DestOptions) error {
+	if dest == nil {
+		dest = &DestOptions{}
 	}
-	agents := opts.agents()
-	cwd := opts.cwd()
+	agents := dest.agents()
+	cwd := dest.cwd()
 	sanitized := SanitizeName(skillName)
 
-	home := opts.homeDir()
-	canonicalPath := filepath.Join(CanonicalSkillsDir(opts.Global, cwd, home), sanitized)
+	home := dest.homeDir()
+	canonicalPath := filepath.Join(canonicalSkillsDir(dest.Global, cwd, home), sanitized)
 
 	for _, agentType := range agentTypes {
 		cfg, ok := agents[agentType]
@@ -356,7 +304,7 @@ func RemoveSkill(skillName string, agentTypes []AgentType, opts *InstallOptions)
 			return fmt.Errorf("unknown agent: %s", agentType)
 		}
 		var agentDir string
-		if opts.Global && cfg.GlobalSkillsDir != "" {
+		if dest.Global && cfg.GlobalSkillsDir != "" {
 			agentDir = filepath.Join(cfg.GlobalSkillsDir, sanitized)
 		} else {
 			agentDir = filepath.Join(cwd, cfg.SkillsDir, sanitized)
@@ -370,17 +318,17 @@ func RemoveSkill(skillName string, agentTypes []AgentType, opts *InstallOptions)
 	return os.RemoveAll(canonicalPath)
 }
 
-// ListInstalledSkills lists all installed skills from canonical and agent directories.
-// The scope can be controlled via opts.Scope (ScopeAll by default, which returns both
-// project and global when opts.Global is false, or global-only when opts.Global is true).
-// For explicit control, set opts.Scope to ScopeProject, ScopeGlobal, or ScopeAll.
-func ListInstalledSkills(opts *InstallOptions) ([]*InstalledSkill, error) {
-	if opts == nil {
-		opts = &InstallOptions{}
+// ListInstalled lists all installed skills from canonical and agent directories.
+// The scope can be controlled via dest.Scope (ScopeAll by default, which returns both
+// project and global when dest.Global is false, or global-only when dest.Global is true).
+// For explicit control, set dest.Scope to ScopeProject, ScopeGlobal, or ScopeAll.
+func ListInstalled(dest *DestOptions) ([]*InstalledSkill, error) {
+	if dest == nil {
+		dest = &DestOptions{}
 	}
-	agents := opts.agents()
-	cwd := opts.cwd()
-	home := opts.homeDir()
+	agents := dest.agents()
+	cwd := dest.cwd()
+	home := dest.homeDir()
 
 	type scanTarget struct {
 		path      string
@@ -404,8 +352,8 @@ func ListInstalledSkills(opts *InstallOptions) ([]*InstalledSkill, error) {
 		global bool
 	}
 	var scopes []scopeDef
-	scope := opts.Scope
-	if scope == ScopeAll && opts.Global {
+	scope := dest.Scope
+	if scope == ScopeAll && dest.Global {
 		// Legacy behavior: Global=true with default scope means global-only
 		scope = ScopeGlobal
 	}
@@ -419,7 +367,7 @@ func ListInstalledSkills(opts *InstallOptions) ([]*InstalledSkill, error) {
 	}
 
 	for _, scope := range scopes {
-		addTarget(CanonicalSkillsDir(scope.global, cwd, home), scope.global, "")
+		addTarget(canonicalSkillsDir(scope.global, cwd, home), scope.global, "")
 		for agentType, cfg := range agents {
 			if scope.global && cfg.GlobalSkillsDir == "" {
 				continue
@@ -521,32 +469,32 @@ func (is *InstalledSkill) AddAgent(t AgentType) {
 	is.Agents = append(is.Agents, t)
 }
 
-// populateLockEntries fills lock entry fields on a successful InstallResult based on InstallOptions.Source.
-func (r *InstallResult) populateLockEntries(skillName, skillPath string, opts *InstallOptions) {
-	if opts.Source == nil {
+// populateLockEntries fills lock entry fields on a successful InstallResult based on SourceRef.
+func (r *InstallResult) populateLockEntries(skillName, skillPath string, dest *DestOptions, src *SourceRef) {
+	if src == nil || src.Parsed == nil {
 		return
 	}
-	ownerRepo := GetOwnerRepo(*opts.Source)
+	ownerRepo := src.Parsed.OwnerRepo()
 	lockSource := ownerRepo
 	if lockSource == "" {
-		lockSource = opts.Source.URL
+		lockSource = src.Parsed.URL
 	}
-	sourceType := string(opts.Source.Type)
+	sourceType := string(src.Parsed.Type)
 
 	// Compute repo-relative skill path for lock entries.
 	// FetchRoot is the clone directory; skillPath is absolute within it.
 	repoRelSkillPath := skillPath
-	if opts.FetchRoot != "" {
-		if rel, err := filepath.Rel(opts.FetchRoot, skillPath); err == nil {
+	if src.FetchRoot != "" {
+		if rel, err := filepath.Rel(src.FetchRoot, skillPath); err == nil {
 			repoRelSkillPath = rel
 		}
 	}
 
-	if opts.Global {
+	if dest.Global {
 		r.GlobalLockEntry = &GlobalLockEntry{
 			Source:     lockSource,
 			SourceType: sourceType,
-			SourceURL:  opts.Source.URL,
+			SourceURL:  src.Parsed.URL,
 			SkillPath:  filepath.Join(repoRelSkillPath, "SKILL.md"),
 		}
 	} else {
@@ -557,18 +505,18 @@ func (r *InstallResult) populateLockEntries(skillName, skillPath string, opts *I
 	}
 }
 
-// ResolveSkillInstallPath returns the directory where a skill would be installed
+// ResolveInstallPath returns the directory where a skill would be installed
 // for the given agent type and options, without actually installing anything.
-func ResolveSkillInstallPath(skillName string, agentType AgentType, opts *InstallOptions) (string, error) {
-	if opts == nil {
-		opts = &InstallOptions{}
+func ResolveInstallPath(skillName string, agentType AgentType, dest *DestOptions) (string, error) {
+	if dest == nil {
+		dest = &DestOptions{}
 	}
-	agents := opts.agents()
+	agents := dest.agents()
 	if _, ok := agents[agentType]; !ok {
 		return "", fmt.Errorf("unknown agent: %s", agentType)
 	}
 	sanitized := SanitizeName(skillName)
-	base := AgentBaseDir(agentType, agents, opts.Global, opts.cwd(), opts.homeDir())
+	base := agentBaseDir(agentType, agents, dest.Global, dest.cwd(), dest.homeDir())
 	return filepath.Join(base, sanitized), nil
 }
 

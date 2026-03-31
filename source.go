@@ -2,11 +2,49 @@ package skills
 
 import (
 	"fmt"
+	"io/fs"
 	"net/url"
 	"path"
 	"path/filepath"
 	"strings"
 )
+
+// Source describes where to obtain skills for installation.
+// Create instances using [SourceFrom], [SourceFromFS], or [SourceFromLocal].
+type Source struct {
+	raw   string // source string (GitHub shorthand, URL, or local path)
+	fsys  fs.FS  // non-nil for FS-based sources
+	local bool   // true to force local path interpretation (skip ParseSource)
+}
+
+// SourceFrom creates a Source from a string that will be parsed automatically.
+// Supports GitHub shorthand ("owner/repo"), Git URLs, well-known endpoints,
+// and local paths. The string may include subpath and skill filter
+// (e.g. "owner/repo/path/to/skills@skill-name").
+func SourceFrom(s string) Source {
+	return Source{raw: s}
+}
+
+// SourceFromFS creates a Source backed by an [fs.FS] (e.g. [embed.FS]).
+func SourceFromFS(fsys fs.FS) Source {
+	return Source{fsys: fsys}
+}
+
+// SourceFromLocal creates a Source from a local directory path.
+// Unlike [SourceFrom], this always treats the path as local
+// without running it through source parsing.
+func SourceFromLocal(path string) Source {
+	return Source{raw: path, local: true}
+}
+
+// IsFS reports whether this source is backed by an fs.FS.
+func (s Source) IsFS() bool { return s.fsys != nil }
+
+// FS returns the fs.FS for FS-backed sources, or nil.
+func (s Source) FS() fs.FS { return s.fsys }
+
+// Raw returns the raw source string.
+func (s Source) Raw() string { return s.raw }
 
 // SourceType identifies how a source was parsed.
 type SourceType string
@@ -45,12 +83,12 @@ func ParseSource(input string) (ParsedSource, error) {
 	return ParseSourceWith(input, nil)
 }
 
-// ParseSourceWith parses a source string, trying custom parsers first.
-// Custom parsers are invoked in order before the built-in logic.
-func ParseSourceWith(input string, parsers []SourceParser) (ParsedSource, error) {
-	// Try custom parsers first
-	for _, p := range parsers {
-		ps, ok, err := p(input)
+// ParseSourceWith parses a source string, trying a custom parser first.
+// If parser is non-nil and recognizes the input, its result is returned.
+// Otherwise the built-in logic is used.
+func ParseSourceWith(input string, parser SourceParser) (ParsedSource, error) {
+	if parser != nil {
+		ps, ok, err := parser(input)
 		if err != nil {
 			return ParsedSource{}, err
 		}
@@ -249,8 +287,8 @@ func parseGitHubShorthand(input string) (ParsedSource, error) {
 	return ParsedSource{}, fmt.Errorf("not a shorthand: %s", input)
 }
 
-// GetOwnerRepo extracts owner/repo from a parsed source for lockfile tracking.
-func GetOwnerRepo(ps ParsedSource) string {
+// OwnerRepo extracts owner/repo from the parsed source for lockfile tracking.
+func (ps ParsedSource) OwnerRepo() string {
 	if ps.Type == SourceLocal {
 		return ""
 	}

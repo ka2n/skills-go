@@ -14,6 +14,7 @@ import (
 	"github.com/ka2n/skills-go/provider/git"
 	"github.com/ka2n/skills-go/provider/github"
 	"github.com/ka2n/skills-go/provider/wellknown"
+	"github.com/ka2n/skills-go/sk"
 )
 
 const version = "0.1.0"
@@ -218,74 +219,24 @@ func cmdAdd(args []string) {
 		mode = skills.InstallSymlink
 	}
 
-	installOpts := &skills.InstallOptions{
+	dest := &skills.DestOptions{
 		Global: opts.global,
 		Mode:   mode,
 		Agents: allAgents,
 	}
 
-	// Handle well-known sources
-	if parsed.Type == skills.SourceWellKnown {
-		installWellKnown(ctx, parsed, targetAgents, installOpts, opts)
-		return
-	}
-
 	// Handle local sources
 	if parsed.Type == skills.SourceLocal {
-		installLocal(ctx, parsed, targetAgents, installOpts, opts)
+		installLocal(ctx, parsed, targetAgents, dest, opts)
 		return
 	}
 
-	// Git-based sources
-	installGit(ctx, parsed, source, targetAgents, installOpts, opts)
+	// Remote sources (git, well-known, etc.)
+	installRemote(ctx, parsed, source, targetAgents, dest, opts)
 }
 
-func installWellKnown(ctx context.Context, parsed skills.ParsedSource, targetAgents []skills.AgentType, installOpts *skills.InstallOptions, opts addOptions) {
-	provider := &wellknown.Provider{}
-	remoteSkills, err := provider.FetchAllSkills(ctx, parsed.URL)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error fetching skills: %v\n", err)
-		os.Exit(1)
-	}
-
-	if len(remoteSkills) == 0 {
-		fmt.Fprintln(os.Stderr, "No skills found at", parsed.URL)
-		os.Exit(1)
-	}
-
-	if opts.list {
-		printRemoteSkills(remoteSkills)
-		return
-	}
-
-	for _, rs := range remoteSkills {
-		if len(opts.skills) > 0 && opts.skills[0] != "*" {
-			found := false
-			for _, name := range opts.skills {
-				if strings.EqualFold(name, rs.Name) || strings.EqualFold(name, rs.InstallName) {
-					found = true
-					break
-				}
-			}
-			if !found {
-				continue
-			}
-		}
-
-		fmt.Printf("Installing %s...\n", rs.Name)
-		for _, agent := range targetAgents {
-			result := skills.InstallRemoteSkillForAgent(rs, agent, installOpts)
-			if result.Success {
-				fmt.Printf("  ✓ %s → %s\n", agent, result.Path)
-			} else if result.Error != "" {
-				fmt.Printf("  ✗ %s: %s\n", agent, result.Error)
-			}
-		}
-	}
-}
-
-func installLocal(_ context.Context, parsed skills.ParsedSource, targetAgents []skills.AgentType, installOpts *skills.InstallOptions, opts addOptions) {
-	discovered, err := skills.DiscoverSkills(parsed.URL, parsed.Subpath, &skills.DiscoverOptions{
+func installLocal(_ context.Context, parsed skills.ParsedSource, targetAgents []skills.AgentType, dest *skills.DestOptions, opts addOptions) {
+	discovered, err := skills.Discover(parsed.URL, parsed.Subpath, &skills.DiscoverOptions{
 		FullDepth:       opts.fullDepth,
 		IncludeInternal: len(opts.skills) > 0,
 	})
@@ -305,21 +256,21 @@ func installLocal(_ context.Context, parsed skills.ParsedSource, targetAgents []
 	}
 
 	toInstall := filterByOpts(discovered, opts)
-	installSkills(toInstall, targetAgents, installOpts, parsed, "local")
+	src := &skills.SourceRef{Parsed: &parsed}
+	installSkillsCmd(toInstall, targetAgents, dest, src)
 }
 
-func installGit(ctx context.Context, parsed skills.ParsedSource, source string, targetAgents []skills.AgentType, installOpts *skills.InstallOptions, opts addOptions) {
-	fmt.Printf("Cloning %s...\n", parsed.URL)
-	fetcher := &git.Fetcher{}
-	localDir, cleanup, err := fetcher.Fetch(ctx, parsed)
+func installRemote(ctx context.Context, parsed skills.ParsedSource, source string, targetAgents []skills.AgentType, dest *skills.DestOptions, opts addOptions) {
+	fmt.Printf("Fetching %s...\n", parsed.URL)
+	f := skills.MultiFetcher(&wellknown.Fetcher{}, &git.Fetcher{})
+	localDir, cleanup, err := f.Fetch(ctx, parsed)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	defer cleanup()
-	installOpts.FetchRoot = localDir
 
-	discovered, err := skills.DiscoverSkills(localDir, parsed.Subpath, &skills.DiscoverOptions{
+	discovered, err := skills.Discover(localDir, parsed.Subpath, &skills.DiscoverOptions{
 		FullDepth:       opts.fullDepth,
 		IncludeInternal: len(opts.skills) > 0 || parsed.SkillFilter != "",
 	})
@@ -330,7 +281,7 @@ func installGit(ctx context.Context, parsed skills.ParsedSource, source string, 
 
 	// Apply @skill filter
 	if parsed.SkillFilter != "" {
-		discovered = skills.FilterSkills(discovered, []string{parsed.SkillFilter})
+		discovered = skills.Filter(discovered, []string{parsed.SkillFilter})
 	}
 
 	if len(discovered) == 0 {
@@ -344,28 +295,26 @@ func installGit(ctx context.Context, parsed skills.ParsedSource, source string, 
 	}
 
 	toInstall := filterByOpts(discovered, opts)
-	installSkills(toInstall, targetAgents, installOpts, parsed, source)
+	src := &skills.SourceRef{Parsed: &parsed, FetchRoot: localDir}
+	installSkillsCmd(toInstall, targetAgents, dest, src)
 }
 
 func filterByOpts(discovered []*skills.Skill, opts addOptions) []*skills.Skill {
 	if len(opts.skills) > 0 && opts.skills[0] != "*" {
-		return skills.FilterSkills(discovered, opts.skills)
+		return skills.Filter(discovered, opts.skills)
 	}
 	return discovered
 }
 
-func installSkills(toInstall []*skills.Skill, targetAgents []skills.AgentType, installOpts *skills.InstallOptions, parsed skills.ParsedSource, source string) {
+func installSkillsCmd(toInstall []*skills.Skill, targetAgents []skills.AgentType, dest *skills.DestOptions, src *skills.SourceRef) {
 	cwd, _ := os.Getwd()
-
-	// Set source on install options for lock entry population
-	installOpts.Source = &parsed
 
 	var allResults []skills.InstallResult
 
 	for _, skill := range toInstall {
 		fmt.Printf("Installing %s...\n", skill.Name)
 		for _, agent := range targetAgents {
-			result := skills.InstallSkillForAgent(skill, agent, installOpts)
+			result := skills.Install(skill, agent, src, dest)
 			allResults = append(allResults, result)
 			if result.Success {
 				fmt.Printf("  ✓ %s → %s\n", agent, result.Path)
@@ -375,10 +324,8 @@ func installSkills(toInstall []*skills.Skill, targetAgents []skills.AgentType, i
 		}
 	}
 
-	// Write lock files using high-level API
-	if err := skills.WriteLockEntries(allResults, homeDir(), cwd); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not write lock: %v\n", err)
-	}
+	// Apply results to lock files
+	writeLockResults(allResults, cwd)
 
 	fmt.Println()
 	fmt.Printf("✓ Installed %d skill(s)\n", len(toInstall))
@@ -409,16 +356,15 @@ func cmdInstall(_ []string) {
 		targetAgents = skills.UniversalAgents(allAgents)
 	}
 
-	installOpts := &skills.InstallOptions{
-		Cwd:    cwd,
-		Agents: allAgents,
-		Providers: &skills.Providers{Fetcher: &git.Fetcher{}},
+	installOpts := &sk.InstallOptions{
+		DestOptions: skills.DestOptions{Cwd: cwd, Agents: allAgents},
+		Providers:   &skills.Providers{Fetcher: &git.Fetcher{}},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	results, err := skills.RestoreFromProjectLock(ctx, lock, targetAgents, installOpts)
+	results, err := sk.RestoreFromProjectLock(ctx, lock, targetAgents, installOpts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -435,9 +381,7 @@ func cmdInstall(_ []string) {
 	}
 
 	// Update lock with new hashes
-	if err := skills.WriteLockEntries(results, homeDir(), cwd); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not write lock: %v\n", err)
-	}
+	writeLockResults(results, cwd)
 
 	fmt.Printf("\n✓ Restored %d skill(s)\n", successCount)
 }
@@ -448,11 +392,6 @@ func printSkills(discovered []*skills.Skill) {
 	}
 }
 
-func printRemoteSkills(discovered []*skills.RemoteSkill) {
-	for _, s := range discovered {
-		fmt.Printf("  %s — %s\n", s.Name, s.Description)
-	}
-}
 
 // --- Remove command ---
 
@@ -478,9 +417,9 @@ func cmdRemove(args []string) {
 
 	allAgents := skills.DefaultAgents(homeDir())
 	cwd, _ := os.Getwd()
-	installOpts := &skills.InstallOptions{Global: global, Cwd: cwd, Agents: allAgents}
+	dest := &skills.DestOptions{Global: global, Cwd: cwd, Agents: allAgents}
 
-	installed, err := skills.ListInstalledSkills(installOpts)
+	installed, err := skills.ListInstalled(dest)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error listing skills: %v\n", err)
 		os.Exit(1)
@@ -520,7 +459,7 @@ func cmdRemove(args []string) {
 	}
 
 	for _, name := range toRemove {
-		if err := skills.RemoveSkill(name, agentTypes, installOpts); err != nil {
+		if err := skills.Uninstall(name, agentTypes, dest); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to remove %s: %v\n", name, err)
 		} else {
 			fmt.Printf("✓ Removed %s\n", name)
@@ -562,10 +501,10 @@ func cmdList(args []string) {
 
 	var projectSkills, globalSkills []*skills.InstalledSkill
 	if global {
-		globalSkills, _ = skills.ListInstalledSkills(&skills.InstallOptions{Cwd: cwd, Agents: allAgents, Scope: skills.ScopeGlobal})
+		globalSkills, _ = skills.ListInstalled(&skills.DestOptions{Cwd: cwd, Agents: allAgents, Scope: skills.ScopeGlobal})
 	} else {
-		projectSkills, _ = skills.ListInstalledSkills(&skills.InstallOptions{Cwd: cwd, Agents: allAgents, Scope: skills.ScopeProject})
-		globalSkills, _ = skills.ListInstalledSkills(&skills.InstallOptions{Cwd: cwd, Agents: allAgents, Scope: skills.ScopeGlobal})
+		projectSkills, _ = skills.ListInstalled(&skills.DestOptions{Cwd: cwd, Agents: allAgents, Scope: skills.ScopeProject})
+		globalSkills, _ = skills.ListInstalled(&skills.DestOptions{Cwd: cwd, Agents: allAgents, Scope: skills.ScopeGlobal})
 	}
 
 	sort.Slice(projectSkills, func(i, j int) bool { return projectSkills[i].Name < projectSkills[j].Name })
@@ -692,7 +631,7 @@ func cmdCheck(args []string) {
 			return
 		}
 		fmt.Println("Checking global skills for updates...")
-		updates, err := skills.CheckUpdates(ctx, lock, &skills.InstallOptions{
+		updates, err := sk.CheckUpdates(ctx, lock, &sk.InstallOptions{
 			Providers: &skills.Providers{HashProvider: &github.HashProvider{Token: github.AutoToken()}},
 		})
 		if err != nil {
@@ -723,9 +662,9 @@ func cmdCheck(args []string) {
 		return
 	}
 	fmt.Println("Checking project skills for updates...")
-	updates, err := skills.CheckProjectUpdates(ctx, lock, &skills.InstallOptions{
-		Cwd:       cwd,
-		Providers: &skills.Providers{Fetcher: &git.Fetcher{}},
+	updates, err := sk.CheckProjectUpdates(ctx, lock, &sk.InstallOptions{
+		DestOptions: skills.DestOptions{Cwd: cwd},
+		Providers:   &skills.Providers{Fetcher: &git.Fetcher{}},
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -771,9 +710,8 @@ func cmdUpdate(args []string) {
 			fmt.Println("No global skills tracked.")
 			return
 		}
-		results, err := skills.UpdateAll(ctx, lock, targetAgents, &skills.InstallOptions{
-			Global: true,
-			Agents: allAgents,
+		results, err := sk.UpdateGlobal(ctx, lock, targetAgents, &sk.InstallOptions{
+			DestOptions: skills.DestOptions{Global: true, Agents: allAgents},
 			Providers: &skills.Providers{
 				Fetcher:      &git.Fetcher{},
 				HashProvider: &github.HashProvider{Token: github.AutoToken()},
@@ -806,10 +744,9 @@ func cmdUpdate(args []string) {
 		fmt.Println("No project skills tracked in skills-lock.json")
 		return
 	}
-	results, err := skills.UpdateProject(ctx, lock, targetAgents, &skills.InstallOptions{
-		Cwd:       cwd,
-		Agents:    allAgents,
-		Providers: &skills.Providers{Fetcher: &git.Fetcher{}},
+	results, err := sk.UpdateProject(ctx, lock, targetAgents, &sk.InstallOptions{
+		DestOptions: skills.DestOptions{Cwd: cwd, Agents: allAgents},
+		Providers:   &skills.Providers{Fetcher: &git.Fetcher{}},
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -824,6 +761,23 @@ func cmdUpdate(args []string) {
 		fmt.Fprintf(os.Stderr, "Warning: could not write lock: %v\n", err)
 	}
 	fmt.Printf("\n✓ Updated %d skill(s)\n", updated)
+}
+
+func writeLockResults(results []skills.InstallResult, projectDir string) {
+	globalLock, err := sk.GlobalLock()
+	if err == nil {
+		globalLock.ApplyResults(results)
+		if err := sk.WriteGlobalLock(globalLock); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not write global lock: %v\n", err)
+		}
+	}
+	projectLock, err := sk.ProjectLock(projectDir)
+	if err == nil {
+		projectLock.ApplyResults(results)
+		if err := sk.WriteProjectLock(projectLock, projectDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not write project lock: %v\n", err)
+		}
+	}
 }
 
 func printUpdateResults(results []skills.InstallResult) int {

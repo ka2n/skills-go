@@ -13,6 +13,7 @@ import (
 
 	skills "github.com/ka2n/skills-go"
 	"github.com/ka2n/skills-go/provider/git"
+	"github.com/ka2n/skills-go/sk"
 	"github.com/ka2n/skills-go/provider/local"
 )
 
@@ -31,11 +32,11 @@ func mustParseSource(t *testing.T, input string) skills.ParsedSource {
 	return ps
 }
 
-// testOpts returns InstallOptions with isolated homeDir and cwd.
-func testOpts(t *testing.T, projectDir string) *skills.InstallOptions {
+// testOpts returns DestOptions with isolated homeDir and cwd.
+func testOpts(t *testing.T, projectDir string) *skills.DestOptions {
 	t.Helper()
 	home := t.TempDir()
-	return &skills.InstallOptions{
+	return &skills.DestOptions{
 		Cwd:     projectDir,
 		HomeDir: home,
 		Agents:  skills.DefaultAgents(home),
@@ -102,8 +103,8 @@ func TestSourceParsingDetails(t *testing.T) {
 
 	t.Run("owner/repo extraction", func(t *testing.T) {
 		ps := mustParseSource(t, "vercel-labs/agent-skills")
-		if diff := cmp.Diff("vercel-labs/agent-skills", skills.GetOwnerRepo(ps)); diff != "" {
-			t.Errorf("GetOwnerRepo mismatch:\n%s", diff)
+		if diff := cmp.Diff("vercel-labs/agent-skills", ps.OwnerRepo()); diff != "" {
+			t.Errorf("OwnerRepo mismatch:\n%s", diff)
 		}
 	})
 }
@@ -247,11 +248,11 @@ func TestLockFileCompat(t *testing.T) {
 
 // --- Discovery & Install ---
 
-func TestDiscoverSkillsLocal(t *testing.T) {
+func TestDiscoverLocal(t *testing.T) {
 	tmp := t.TempDir()
 	writeSkill(t, tmp, "skills/my-skill", "my-skill", "My test skill")
 
-	discovered, err := skills.DiscoverSkills(tmp, "", nil)
+	discovered, err := skills.Discover(tmp, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,16 +268,16 @@ func TestInstallAndList(t *testing.T) {
 	srcDir := t.TempDir()
 	writeSkill(t, srcDir, "skills/test-skill", "test-skill", "Test")
 
-	discovered, err := skills.DiscoverSkills(srcDir, "", nil)
+	discovered, err := skills.Discover(srcDir, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	projectDir := t.TempDir()
-	opts := testOpts(t, projectDir)
-	opts.Mode = skills.InstallCopy
+	dest := testOpts(t, projectDir)
+	dest.Mode = skills.InstallCopy
 
-	result := skills.InstallSkillForAgent(discovered[0], skills.AgentClaudeCode, opts)
+	result := skills.Install(discovered[0], skills.AgentClaudeCode, nil, dest)
 	if !result.Success {
 		t.Fatalf("install failed: %s", result.Error)
 	}
@@ -288,7 +289,7 @@ func TestInstallAndList(t *testing.T) {
 	}
 
 	// Verify listed (isolated home — no global skill leakage)
-	installed, _ := skills.ListInstalledSkills(opts)
+	installed, _ := skills.ListInstalled(dest)
 	names := make([]string, len(installed))
 	for i, s := range installed {
 		names[i] = s.Name
@@ -303,11 +304,11 @@ func TestInstallSymlinkStructure(t *testing.T) {
 	writeSkill(t, srcDir, "skills/test-compat", "test-compat", "Compatibility test skill")
 
 	projectDir := t.TempDir()
-	opts := testOpts(t, projectDir)
-	opts.Mode = skills.InstallSymlink
+	dest := testOpts(t, projectDir)
+	dest.Mode = skills.InstallSymlink
 
-	result := skills.InstallSkillForAgent(
-		mustDiscover(t, srcDir)[0], skills.AgentClaudeCode, opts)
+	result := skills.Install(
+		mustDiscover(t, srcDir)[0], skills.AgentClaudeCode, nil, dest)
 	if !result.Success {
 		t.Fatalf("install failed: %s", result.Error)
 	}
@@ -381,7 +382,7 @@ func TestIntegrationGitClone(t *testing.T) {
 	}
 	defer cleanup()
 
-	discovered, err := skills.DiscoverSkills(localDir, "", nil)
+	discovered, err := skills.Discover(localDir, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +394,7 @@ func TestIntegrationGitClone(t *testing.T) {
 	}
 }
 
-func TestIntegrationInstallVercelSkills(t *testing.T) {
+func TestIntegrationInstallVercel(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
@@ -405,16 +406,16 @@ func TestIntegrationInstallVercelSkills(t *testing.T) {
 	}
 	defer cleanup()
 
-	discovered, _ := skills.DiscoverSkills(localDir, "", nil)
+	discovered, _ := skills.Discover(localDir, "", nil)
 	projectDir := t.TempDir()
-	opts := testOpts(t, projectDir)
-	opts.Mode = skills.InstallCopy
+	dest := testOpts(t, projectDir)
+	dest.Mode = skills.InstallCopy
 
 	n := min(3, len(discovered))
 	lock := skills.NewProjectLock()
 
 	for _, skill := range discovered[:n] {
-		result := skills.InstallSkillForAgent(skill, skills.AgentClaudeCode, opts)
+		result := skills.Install(skill, skills.AgentClaudeCode, nil, dest)
 		if !result.Success {
 			t.Errorf("install %s: %s", skill.Name, result.Error)
 			continue
@@ -443,7 +444,7 @@ func TestIntegrationInstallVercelSkills(t *testing.T) {
 
 // --- OnParseError callback ---
 
-func TestDiscoverSkillsOnParseError(t *testing.T) {
+func TestDiscoverOnParseError(t *testing.T) {
 	tmp := t.TempDir()
 	// Create a skill with invalid frontmatter (missing description)
 	dir := filepath.Join(tmp, "skills", "bad-skill")
@@ -456,7 +457,7 @@ func TestDiscoverSkillsOnParseError(t *testing.T) {
 			parseErrors = append(parseErrors, path+": "+err.Error())
 		},
 	}
-	discovered, err := skills.DiscoverSkills(tmp, "", opts)
+	discovered, err := skills.Discover(tmp, "", opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,12 +511,12 @@ disable-model-invocation: true
 	}
 }
 
-// --- RemoveSkill unknown agent guard ---
+// --- Remove unknown agent guard ---
 
-func TestRemoveSkillUnknownAgent(t *testing.T) {
+func TestRemoveUnknownAgent(t *testing.T) {
 	tmp := t.TempDir()
-	opts := &skills.InstallOptions{Cwd: tmp, HomeDir: t.TempDir(), Agents: skills.DefaultAgents(t.TempDir())}
-	err := skills.RemoveSkill("test", []skills.AgentType{"nonexistent-agent"}, opts)
+	dest := &skills.DestOptions{Cwd: tmp, HomeDir: t.TempDir(), Agents: skills.DefaultAgents(t.TempDir())}
+	err := skills.Uninstall("test", []skills.AgentType{"nonexistent-agent"}, dest)
 	if err == nil {
 		t.Error("expected error for unknown agent type")
 	}
@@ -523,21 +524,21 @@ func TestRemoveSkillUnknownAgent(t *testing.T) {
 
 // --- SkippedFiles in remote install ---
 
-func TestInstallRemoteSkillSkipsUnsafePaths(t *testing.T) {
+func TestInstallSkipsUnsafePaths(t *testing.T) {
 	projectDir := t.TempDir()
-	opts := testOpts(t, projectDir)
-	opts.Mode = skills.InstallCopy
+	dest := testOpts(t, projectDir)
+	dest.Mode = skills.InstallCopy
 
-	rs := &skills.RemoteSkill{
+	rs := &skills.Skill{
 		Name:        "test-skill",
-		InstallName: "test-skill",
+		Description: "test",
 		Files: map[string]string{
 			"SKILL.md":           "---\nname: test-skill\ndescription: test\n---\n",
 			"../escape/evil.txt": "pwned",
 		},
 	}
 
-	result := skills.InstallRemoteSkillForAgent(rs, skills.AgentClaudeCode, opts)
+	result := skills.Install(rs, skills.AgentClaudeCode, nil, dest)
 	if !result.Success {
 		t.Fatalf("install failed: %s", result.Error)
 	}
@@ -557,10 +558,10 @@ func TestCopyPreservesHiddenFiles(t *testing.T) {
 
 	discovered := mustDiscover(t, srcDir)
 	projectDir := t.TempDir()
-	opts := testOpts(t, projectDir)
-	opts.Mode = skills.InstallCopy
+	dest := testOpts(t, projectDir)
+	dest.Mode = skills.InstallCopy
 
-	result := skills.InstallSkillForAgent(discovered[0], skills.AgentClaudeCode, opts)
+	result := skills.Install(discovered[0], skills.AgentClaudeCode, nil, dest)
 	if !result.Success {
 		t.Fatalf("install failed: %s", result.Error)
 	}
@@ -575,22 +576,22 @@ func TestCopyPreservesHiddenFiles(t *testing.T) {
 
 func TestInstallResultErrField(t *testing.T) {
 	projectDir := t.TempDir()
-	opts := testOpts(t, projectDir)
+	dest := testOpts(t, projectDir)
 
 	skill := &skills.Skill{Name: "test", Description: "test", Path: "/nonexistent"}
-	result := skills.InstallSkillForAgent(skill, "nonexistent-agent", opts)
+	result := skills.Install(skill, "nonexistent-agent", nil, dest)
 	if result.Err == nil {
 		t.Error("expected Err to be non-nil for unknown agent")
 	}
 }
 
-// --- ResolveSkillInstallPath ---
+// --- ResolveInstallPath ---
 
-func TestResolveSkillInstallPath(t *testing.T) {
+func TestResolveInstallPath(t *testing.T) {
 	projectDir := t.TempDir()
-	opts := testOpts(t, projectDir)
+	dest := testOpts(t, projectDir)
 
-	path, err := skills.ResolveSkillInstallPath("My Skill", skills.AgentClaudeCode, opts)
+	path, err := skills.ResolveInstallPath("My Skill", skills.AgentClaudeCode, dest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,7 +605,7 @@ func TestResolveSkillInstallPath(t *testing.T) {
 
 // --- OnDuplicate callback ---
 
-func TestDiscoverSkillsOnDuplicate(t *testing.T) {
+func TestDiscoverOnDuplicate(t *testing.T) {
 	tmp := t.TempDir()
 	writeSkill(t, tmp, "skills/my-skill", "my-skill", "First")
 	writeSkill(t, tmp, ".github/skills/my-skill", "my-skill", "Second")
@@ -616,7 +617,7 @@ func TestDiscoverSkillsOnDuplicate(t *testing.T) {
 			duplicates = append(duplicates, name)
 		},
 	}
-	discovered, err := skills.DiscoverSkills(tmp, "", opts)
+	discovered, err := skills.Discover(tmp, "", opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -653,16 +654,16 @@ func TestRestoreFromProjectLock(t *testing.T) {
 
 	// Install to get hashes
 	projectDir := t.TempDir()
-	opts := testOpts(t, projectDir)
-	opts.Mode = skills.InstallCopy
+	dest := testOpts(t, projectDir)
+	dest.Mode = skills.InstallCopy
 	srcAbs, _ := filepath.Abs(srcDir)
 	source := skills.ParsedSource{Type: skills.SourceLocal, URL: srcAbs}
-	opts.Source = &source
+	src := &skills.SourceRef{Parsed: &source}
 
-	discovered, _ := skills.DiscoverSkills(srcDir, "", nil)
+	discovered, _ := skills.Discover(srcDir, "", nil)
 	lock := skills.NewProjectLock()
 	for _, skill := range discovered {
-		r := skills.InstallSkillForAgent(skill, skills.AgentClaudeCode, opts)
+		r := skills.Install(skill, skills.AgentClaudeCode, src, dest)
 		if !r.Success {
 			t.Fatalf("setup install failed: %s", r.Error)
 		}
@@ -676,10 +677,14 @@ func TestRestoreFromProjectLock(t *testing.T) {
 
 	// Now restore into a fresh project directory
 	restoreDir := t.TempDir()
-	restoreOpts := testOpts(t, restoreDir)
-	restoreOpts.Mode = skills.InstallCopy
+	restoreDest := testOpts(t, restoreDir)
+	restoreDest.Mode = skills.InstallCopy
 
-	results, err := skills.RestoreFromProjectLock(
+	restoreOpts := &sk.InstallOptions{
+		DestOptions: *restoreDest,
+	}
+
+	results, err := sk.RestoreFromProjectLock(
 		context.Background(), lock,
 		[]skills.AgentType{skills.AgentClaudeCode}, restoreOpts,
 	)
@@ -698,7 +703,7 @@ func TestRestoreFromProjectLock(t *testing.T) {
 	}
 
 	// Verify skills exist in restored directory
-	installed, _ := skills.ListInstalledSkills(restoreOpts)
+	installed, _ := skills.ListInstalled(restoreDest)
 	if len(installed) != 2 {
 		t.Errorf("expected 2 installed skills after restore, got %d", len(installed))
 	}
@@ -722,9 +727,9 @@ func TestCheckProjectUpdates(t *testing.T) {
 	})
 
 	// No updates yet
-	updates, err := skills.CheckProjectUpdates(
+	updates, err := sk.CheckProjectUpdates(
 		context.Background(), lock,
-		&skills.InstallOptions{Cwd: t.TempDir()},
+		&sk.InstallOptions{DestOptions: skills.DestOptions{Cwd: t.TempDir()}},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -741,9 +746,9 @@ func TestCheckProjectUpdates(t *testing.T) {
 	)
 
 	// Now should detect update
-	updates, err = skills.CheckProjectUpdates(
+	updates, err = sk.CheckProjectUpdates(
 		context.Background(), lock,
-		&skills.InstallOptions{Cwd: t.TempDir()},
+		&sk.InstallOptions{DestOptions: skills.DestOptions{Cwd: t.TempDir()}},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -775,7 +780,7 @@ func writeSkill(t *testing.T, base, relDir, name, desc string) {
 
 func mustDiscover(t *testing.T, dir string) []*skills.Skill {
 	t.Helper()
-	s, err := skills.DiscoverSkills(dir, "", nil)
+	s, err := skills.Discover(dir, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

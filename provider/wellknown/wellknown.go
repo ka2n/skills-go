@@ -1,4 +1,4 @@
-// Package wellknown implements skills.HostProvider for RFC 8615 well-known endpoints.
+// Package wellknown implements [skills.Fetcher] for RFC 8615 well-known endpoints.
 //
 // Organizations can publish skills at:
 //
@@ -32,9 +32,8 @@ type SkillEntry struct {
 	Files       []string `json:"files"`
 }
 
-var _ skills.HostProvider = (*Provider)(nil)
-
-// Provider implements skills.HostProvider for RFC 8615 well-known endpoints.
+// Provider handles RFC 8615 well-known skill endpoints.
+// Use [Fetcher] to integrate with the skills.Fetcher interface.
 type Provider struct {
 	Client *http.Client
 }
@@ -161,7 +160,7 @@ func isValidEntry(e SkillEntry) bool {
 	return hasSkillMd
 }
 
-func (p *Provider) FetchSkill(ctx context.Context, rawURL string) (*skills.RemoteSkill, error) {
+func (p *Provider) FetchSkill(ctx context.Context, rawURL string) (*skills.Skill, error) {
 	result, err := p.fetchIndex(ctx, rawURL)
 	if err != nil {
 		return nil, err
@@ -210,7 +209,7 @@ func extractSkillName(rawURL string) string {
 	return ""
 }
 
-func (p *Provider) fetchSkillByEntry(ctx context.Context, baseURL string, entry SkillEntry, wkPath string) (*skills.RemoteSkill, error) {
+func (p *Provider) fetchSkillByEntry(ctx context.Context, baseURL string, entry SkillEntry, wkPath string) (*skills.Skill, error) {
 	skillBaseURL := strings.TrimSuffix(baseURL, "/") + "/" + path.Join(wkPath, entry.Name)
 
 	skillMdURL := skillBaseURL + "/SKILL.md"
@@ -264,23 +263,19 @@ func (p *Provider) fetchSkillByEntry(ctx context.Context, baseURL string, entry 
 		files[filePath] = string(fileBytes)
 	}
 
-	return &skills.RemoteSkill{
-		Name:        s.Name,
-		Description: s.Description,
-		Content:     content,
-		InstallName: entry.Name,
-		SourceURL:   skillMdURL,
-		ProviderID:  "well-known",
-		Files:       files,
-	}, nil
+	s.Files = files
+	s.RawContent = content
+	s.SourceURL = skillMdURL
+	s.ProviderID = "well-known"
+	return s, nil
 }
 
-func (p *Provider) FetchAllSkills(ctx context.Context, rawURL string) ([]*skills.RemoteSkill, error) {
+func (p *Provider) FetchAllSkills(ctx context.Context, rawURL string) ([]*skills.Skill, error) {
 	result, err := p.fetchIndex(ctx, rawURL)
 	if err != nil {
 		return nil, err
 	}
-	var out []*skills.RemoteSkill
+	var out []*skills.Skill
 	for _, entry := range result.Index.Skills {
 		s, err := p.fetchSkillByEntry(ctx, result.ResolvedBaseURL, entry, result.WellKnownPath)
 		if err != nil {

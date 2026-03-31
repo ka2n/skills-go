@@ -12,14 +12,14 @@ import (
 	skills "github.com/ka2n/skills-go"
 )
 
-func TestDiscoverSkillsFS_Basic(t *testing.T) {
+func TestDiscoverFS_Basic(t *testing.T) {
 	fsys := fstest.MapFS{
 		"skills/my-skill/SKILL.md": &fstest.MapFile{
 			Data: []byte("---\nname: my-skill\ndescription: A test skill\n---\n\n# My Skill\n"),
 		},
 	}
 
-	discovered, err := skills.DiscoverSkillsFS(fsys, "", nil)
+	discovered, err := skills.DiscoverFS(fsys, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestDiscoverSkillsFS_Basic(t *testing.T) {
 	}
 }
 
-func TestDiscoverSkillsFS_MultipleSkills(t *testing.T) {
+func TestDiscoverFS_MultipleSkills(t *testing.T) {
 	fsys := fstest.MapFS{
 		"skills/skill-a/SKILL.md": &fstest.MapFile{
 			Data: []byte("---\nname: skill-a\ndescription: Skill A\n---\n"),
@@ -51,7 +51,7 @@ func TestDiscoverSkillsFS_MultipleSkills(t *testing.T) {
 		},
 	}
 
-	discovered, err := skills.DiscoverSkillsFS(fsys, "", nil)
+	discovered, err := skills.DiscoverFS(fsys, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,14 +69,14 @@ func TestDiscoverSkillsFS_MultipleSkills(t *testing.T) {
 	}
 }
 
-func TestDiscoverSkillsFS_Subpath(t *testing.T) {
+func TestDiscoverFS_Subpath(t *testing.T) {
 	fsys := fstest.MapFS{
 		"some/nested/path/my-skill/SKILL.md": &fstest.MapFile{
 			Data: []byte("---\nname: nested-skill\ndescription: Nested\n---\n"),
 		},
 	}
 
-	discovered, err := skills.DiscoverSkillsFS(fsys, "some/nested/path", nil)
+	discovered, err := skills.DiscoverFS(fsys, "some/nested/path", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,14 +88,14 @@ func TestDiscoverSkillsFS_Subpath(t *testing.T) {
 	}
 }
 
-func TestDiscoverSkillsFS_DirectSkillDir(t *testing.T) {
+func TestDiscoverFS_DirectSkillDir(t *testing.T) {
 	fsys := fstest.MapFS{
 		"my-skill/SKILL.md": &fstest.MapFile{
 			Data: []byte("---\nname: direct-skill\ndescription: Direct\n---\n"),
 		},
 	}
 
-	discovered, err := skills.DiscoverSkillsFS(fsys, "my-skill", nil)
+	discovered, err := skills.DiscoverFS(fsys, "my-skill", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestDiscoverSkillsFS_DirectSkillDir(t *testing.T) {
 	}
 }
 
-func TestDiscoverSkillsFS_FullDepth(t *testing.T) {
+func TestDiscoverFS_FullDepth(t *testing.T) {
 	fsys := fstest.MapFS{
 		"a/b/c/deep-skill/SKILL.md": &fstest.MapFile{
 			Data: []byte("---\nname: deep-skill\ndescription: Deep\n---\n"),
@@ -118,7 +118,7 @@ func TestDiscoverSkillsFS_FullDepth(t *testing.T) {
 	}
 
 	opts := &skills.DiscoverOptions{FullDepth: true}
-	discovered, err := skills.DiscoverSkillsFS(fsys, "", opts)
+	discovered, err := skills.DiscoverFS(fsys, "", opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestDiscoverSkillsFS_FullDepth(t *testing.T) {
 	}
 }
 
-func TestDiscoverSkillsFS_OnParseError(t *testing.T) {
+func TestDiscoverFS_OnParseError(t *testing.T) {
 	fsys := fstest.MapFS{
 		"skills/bad-skill/SKILL.md": &fstest.MapFile{
 			Data: []byte("---\nname: bad\n---\n"), // missing description
@@ -146,7 +146,7 @@ func TestDiscoverSkillsFS_OnParseError(t *testing.T) {
 			parseErrors = append(parseErrors, path)
 		},
 	}
-	discovered, err := skills.DiscoverSkillsFS(fsys, "", opts)
+	discovered, err := skills.DiscoverFS(fsys, "", opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestDiscoverSkillsFS_OnParseError(t *testing.T) {
 	}
 }
 
-func TestDiscoverSkillsFS_OnDuplicate(t *testing.T) {
+func TestDiscoverFS_OnDuplicate(t *testing.T) {
 	fsys := fstest.MapFS{
 		"skills/my-skill/SKILL.md": &fstest.MapFile{
 			Data: []byte("---\nname: my-skill\ndescription: First\n---\n"),
@@ -175,7 +175,7 @@ func TestDiscoverSkillsFS_OnDuplicate(t *testing.T) {
 			duplicates = append(duplicates, name)
 		},
 	}
-	discovered, err := skills.DiscoverSkillsFS(fsys, "", opts)
+	discovered, err := skills.DiscoverFS(fsys, "", opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,10 +187,10 @@ func TestDiscoverSkillsFS_OnDuplicate(t *testing.T) {
 	}
 }
 
-func TestDiscoverSkillsFS_EmptyFS(t *testing.T) {
+func TestDiscoverFS_EmptyFS(t *testing.T) {
 	fsys := fstest.MapFS{}
 
-	discovered, err := skills.DiscoverSkillsFS(fsys, "", nil)
+	discovered, err := skills.DiscoverFS(fsys, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,13 +199,13 @@ func TestDiscoverSkillsFS_EmptyFS(t *testing.T) {
 	}
 }
 
-// TestDiscoverSkills_BackwardCompat verifies the string-based DiscoverSkills
+// TestDiscover_BackwardCompat verifies the string-based Discover
 // still returns absolute paths and works as before.
-func TestDiscoverSkills_BackwardCompat(t *testing.T) {
+func TestDiscover_BackwardCompat(t *testing.T) {
 	tmp := t.TempDir()
 	writeSkill(t, tmp, "skills/compat-skill", "compat-skill", "Backward compat test")
 
-	discovered, err := skills.DiscoverSkills(tmp, "", nil)
+	discovered, err := skills.Discover(tmp, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,8 +226,8 @@ func TestDiscoverSkills_BackwardCompat(t *testing.T) {
 	}
 }
 
-// TestInstallSkillForAgent_WithSourceFS tests installing a skill from an fs.FS source.
-func TestInstallSkillForAgent_WithSourceFS(t *testing.T) {
+// TestInstallForAgent_WithSourceFS tests installing a skill from an fs.FS source.
+func TestInstallForAgent_WithSourceFS(t *testing.T) {
 	fsys := fstest.MapFS{
 		"skills/fs-skill/SKILL.md": &fstest.MapFile{
 			Data: []byte("---\nname: fs-skill\ndescription: FS-sourced skill\n---\n\n# FS Skill\n"),
@@ -238,7 +238,7 @@ func TestInstallSkillForAgent_WithSourceFS(t *testing.T) {
 	}
 
 	// Discover via FS
-	discovered, err := skills.DiscoverSkillsFS(fsys, "", nil)
+	discovered, err := skills.DiscoverFS(fsys, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,13 +246,13 @@ func TestInstallSkillForAgent_WithSourceFS(t *testing.T) {
 		t.Fatalf("expected 1 skill, got %d", len(discovered))
 	}
 
-	// Install with SourceFS
+	// Install with SourceRef.FS
 	projectDir := t.TempDir()
-	opts := testOpts(t, projectDir)
-	opts.Mode = skills.InstallCopy
-	opts.SourceFS = fsys
+	dest := testOpts(t, projectDir)
+	dest.Mode = skills.InstallCopy
+	src := &skills.SourceRef{FS: fsys}
 
-	result := skills.InstallSkillForAgent(discovered[0], skills.AgentClaudeCode, opts)
+	result := skills.Install(discovered[0], skills.AgentClaudeCode, src, dest)
 	if !result.Success {
 		t.Fatalf("install failed: %s", result.Error)
 	}
@@ -278,25 +278,25 @@ func TestInstallSkillForAgent_WithSourceFS(t *testing.T) {
 	}
 }
 
-// TestInstallSkillForAgent_WithSourceFS_Symlink tests symlink mode with FS source.
-func TestInstallSkillForAgent_WithSourceFS_Symlink(t *testing.T) {
+// TestInstallForAgent_WithSourceFS_Symlink tests symlink mode with FS source.
+func TestInstallForAgent_WithSourceFS_Symlink(t *testing.T) {
 	fsys := fstest.MapFS{
 		"skills/sym-skill/SKILL.md": &fstest.MapFile{
 			Data: []byte("---\nname: sym-skill\ndescription: Symlink FS test\n---\n"),
 		},
 	}
 
-	discovered, err := skills.DiscoverSkillsFS(fsys, "", nil)
+	discovered, err := skills.DiscoverFS(fsys, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	projectDir := t.TempDir()
-	opts := testOpts(t, projectDir)
-	opts.Mode = skills.InstallSymlink
-	opts.SourceFS = fsys
+	dest := testOpts(t, projectDir)
+	dest.Mode = skills.InstallSymlink
+	src := &skills.SourceRef{FS: fsys}
 
-	result := skills.InstallSkillForAgent(discovered[0], skills.AgentClaudeCode, opts)
+	result := skills.Install(discovered[0], skills.AgentClaudeCode, src, dest)
 	if !result.Success {
 		t.Fatalf("install failed: %s", result.Error)
 	}
@@ -318,9 +318,9 @@ func TestInstallSkillForAgent_WithSourceFS_Symlink(t *testing.T) {
 	}
 }
 
-// TestInstallSkillForAgent_WithSourceFS_ExcludesMetadata verifies that
+// TestInstallForAgent_WithSourceFS_ExcludesMetadata verifies that
 // excluded files (metadata.json) are not copied from FS sources.
-func TestInstallSkillForAgent_WithSourceFS_ExcludesMetadata(t *testing.T) {
+func TestInstallForAgent_WithSourceFS_ExcludesMetadata(t *testing.T) {
 	fsys := fstest.MapFS{
 		"my-skill/SKILL.md": &fstest.MapFile{
 			Data: []byte("---\nname: meta-test\ndescription: Metadata exclusion test\n---\n"),
@@ -333,17 +333,17 @@ func TestInstallSkillForAgent_WithSourceFS_ExcludesMetadata(t *testing.T) {
 		},
 	}
 
-	discovered, err := skills.DiscoverSkillsFS(fsys, "my-skill", nil)
+	discovered, err := skills.DiscoverFS(fsys, "my-skill", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	projectDir := t.TempDir()
-	opts := testOpts(t, projectDir)
-	opts.Mode = skills.InstallCopy
-	opts.SourceFS = fsys
+	dest := testOpts(t, projectDir)
+	dest.Mode = skills.InstallCopy
+	src := &skills.SourceRef{FS: fsys}
 
-	result := skills.InstallSkillForAgent(discovered[0], skills.AgentClaudeCode, opts)
+	result := skills.Install(discovered[0], skills.AgentClaudeCode, src, dest)
 	if !result.Success {
 		t.Fatalf("install failed: %s", result.Error)
 	}
@@ -359,8 +359,8 @@ func TestInstallSkillForAgent_WithSourceFS_ExcludesMetadata(t *testing.T) {
 	}
 }
 
-// TestDiscoverSkillsFS_SkipDirs verifies that .git, node_modules etc are skipped.
-func TestDiscoverSkillsFS_SkipDirs(t *testing.T) {
+// TestDiscoverFS_SkipDirs verifies that .git, node_modules etc are skipped.
+func TestDiscoverFS_SkipDirs(t *testing.T) {
 	fsys := fstest.MapFS{
 		"node_modules/some-pkg/SKILL.md": &fstest.MapFile{
 			Data: []byte("---\nname: should-skip\ndescription: In node_modules\n---\n"),
@@ -374,7 +374,7 @@ func TestDiscoverSkillsFS_SkipDirs(t *testing.T) {
 	}
 
 	opts := &skills.DiscoverOptions{FullDepth: true}
-	discovered, err := skills.DiscoverSkillsFS(fsys, "", opts)
+	discovered, err := skills.DiscoverFS(fsys, "", opts)
 	if err != nil {
 		t.Fatal(err)
 	}

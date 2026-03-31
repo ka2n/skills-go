@@ -203,6 +203,42 @@ func (l *ProjectLock) RemoveSkill(name string) {
 	delete(l.Skills, name)
 }
 
+// ApplyResults applies successful install results to the global lock.
+// It does not write to disk; the caller is responsible for persistence.
+func (l *GlobalLock) ApplyResults(results []InstallResult) {
+	for _, r := range results {
+		if r.GlobalLockEntry != nil && r.Success {
+			if r.Path != "" {
+				hash, _ := ComputeFolderHash(r.Path)
+				r.GlobalLockEntry.SkillFolderHash = hash
+			}
+			name := r.SkillName
+			if name == "" {
+				name = filepath.Base(r.Path)
+			}
+			l.SetSkill(name, *r.GlobalLockEntry)
+		}
+	}
+}
+
+// ApplyResults applies successful install results to the project lock.
+// It does not write to disk; the caller is responsible for persistence.
+func (l *ProjectLock) ApplyResults(results []InstallResult) {
+	for _, r := range results {
+		if r.ProjectLockEntry != nil && r.Success {
+			if r.Path != "" {
+				hash, _ := ComputeFolderHash(r.Path)
+				r.ProjectLockEntry.ComputedHash = hash
+			}
+			name := r.SkillName
+			if name == "" {
+				name = filepath.Base(r.Path)
+			}
+			l.SetSkill(name, *r.ProjectLockEntry)
+		}
+	}
+}
+
 // GlobalLockPath returns the default path for the global lock file.
 // It checks XDG_STATE_HOME first, then falls back to ~/.agents/.skill-lock.json.
 // homeDir is the user's home directory.

@@ -17,7 +17,7 @@ type DiscoverOptions struct {
 	IncludeInternal bool
 	FullDepth       bool
 	// Agents is used to derive priority search directories from AgentConfig.SkillsDir.
-	// If nil, DefaultAgents(UserHomeDir()) is used.
+	// If nil, DefaultAgents with the current user's home directory is used.
 	Agents map[AgentType]AgentConfig
 	// OnParseError is called when a SKILL.md file cannot be parsed.
 	// If nil, parse errors are silently ignored (legacy behavior).
@@ -28,8 +28,8 @@ type DiscoverOptions struct {
 	OnDuplicate func(name, path1, path2 string)
 }
 
-// DiscoverSkills finds all SKILL.md files in the given directory.
-func DiscoverSkills(basePath string, subpath string, opts *DiscoverOptions) ([]*Skill, error) {
+// Discover finds all SKILL.md files in the given directory.
+func Discover(basePath string, subpath string, opts *DiscoverOptions) ([]*Skill, error) {
 	if opts == nil {
 		opts = &DiscoverOptions{}
 	}
@@ -44,7 +44,7 @@ func DiscoverSkills(basePath string, subpath string, opts *DiscoverOptions) ([]*
 	}
 	defer root.Close()
 
-	skills, err := DiscoverSkillsFS(root.FS(), subpath, opts)
+	skills, err := DiscoverFS(root.FS(), subpath, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -56,10 +56,10 @@ func DiscoverSkills(basePath string, subpath string, opts *DiscoverOptions) ([]*
 	return skills, nil
 }
 
-// DiscoverSkillsFS finds all SKILL.md files in the given fs.FS.
+// DiscoverFS finds all SKILL.md files in the given fs.FS.
 // Paths within the FS use forward slashes (path.Join). Skill.Path is set to
 // the FS-relative path (e.g. "skills/my-skill").
-func DiscoverSkillsFS(fsys fs.FS, subpath string, opts *DiscoverOptions) ([]*Skill, error) {
+func DiscoverFS(fsys fs.FS, subpath string, opts *DiscoverOptions) ([]*Skill, error) {
 	if opts == nil {
 		opts = &DiscoverOptions{}
 	}
@@ -139,8 +139,8 @@ func DiscoverSkillsFS(fsys fs.FS, subpath string, opts *DiscoverOptions) ([]*Ski
 	return skills, nil
 }
 
-// FilterSkills filters skills by name (case-insensitive).
-func FilterSkills(skills []*Skill, names []string) []*Skill {
+// Filter filters skills by name (case-insensitive).
+func Filter(skills []*Skill, names []string) []*Skill {
 	normalized := make(map[string]bool)
 	for _, n := range names {
 		normalized[strings.ToLower(n)] = true
@@ -158,7 +158,7 @@ func FilterSkills(skills []*Skill, names []string) []*Skill {
 // agent SkillsDir values plus well-known conventional locations.
 func skillSearchDirs(searchPath string, agents map[AgentType]AgentConfig) []string {
 	if agents == nil {
-		agents = DefaultAgents(UserHomeDir())
+		agents = DefaultAgents(userHomeDir())
 	}
 
 	seen := map[string]bool{}
@@ -193,7 +193,7 @@ func skillSearchDirs(searchPath string, agents map[AgentType]AgentConfig) []stri
 // using forward-slash paths (path.Join).
 func skillSearchDirsFS(searchPath string, agents map[AgentType]AgentConfig) []string {
 	if agents == nil {
-		agents = DefaultAgents(UserHomeDir())
+		agents = DefaultAgents(userHomeDir())
 	}
 
 	seen := map[string]bool{}

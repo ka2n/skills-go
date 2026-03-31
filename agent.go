@@ -66,9 +66,7 @@ type AgentConfig struct {
 	DetectInstalled func() bool
 }
 
-// UserHomeDir returns the current user's home directory.
-// This is the canonical way to get the home directory in the library.
-func UserHomeDir() string {
+func userHomeDir() string {
 	h, _ := os.UserHomeDir()
 	return h
 }
@@ -164,8 +162,7 @@ func DefaultAgents(homeDir string) map[AgentType]AgentConfig {
 	return m
 }
 
-// IsUniversalAgent returns true if the agent uses the universal .agents/skills directory.
-func IsUniversalAgent(agents map[AgentType]AgentConfig, agentType AgentType) bool {
+func isUniversalAgent(agents map[AgentType]AgentConfig, agentType AgentType) bool {
 	cfg, ok := agents[agentType]
 	if !ok {
 		return false

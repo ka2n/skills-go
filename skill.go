@@ -33,28 +33,26 @@ type Skill struct {
 	Body string `yaml:"-" json:"-"`
 	// RawContent is the original SKILL.md content for hashing.
 	RawContent string `yaml:"-" json:"-"`
-	// Path is the directory containing the SKILL.md file (absolute on disk).
+	// Path is the directory containing the SKILL.md file (absolute on disk, or FS-relative).
+	// When Files is set, Path may be empty.
 	Path string `yaml:"-" json:"path,omitempty"`
+	// Files holds in-memory file contents for skills fetched from remote providers.
+	// When non-nil, Install writes these to disk instead of copying from Path.
+	// Keys are relative file paths (e.g. "SKILL.md", "helper.sh").
+	Files map[string]string `yaml:"-" json:"files,omitempty"`
 	// PluginName is the name of the plugin this skill belongs to (if any).
 	PluginName string `yaml:"-" json:"pluginName,omitempty"`
+	// SourceURL is the URL of the source (set by remote providers).
+	SourceURL string `yaml:"-" json:"sourceUrl,omitempty"`
+	// ProviderID identifies which provider fetched this skill.
+	ProviderID string `yaml:"-" json:"providerId,omitempty"`
+	// SourceIdentifier is a provider-specific identifier for the source.
+	SourceIdentifier string `yaml:"-" json:"sourceIdentifier,omitempty"`
 }
 
 // SkillMetadata contains optional metadata fields for a skill.
 type SkillMetadata struct {
 	Internal bool `yaml:"internal,omitempty" json:"internal,omitempty"`
-}
-
-// RemoteSkill represents a skill fetched from a remote host provider.
-type RemoteSkill struct {
-	Name             string            `json:"name"`
-	Description      string            `json:"description"`
-	Content          string            `json:"content"`
-	InstallName      string            `json:"installName"`
-	SourceURL        string            `json:"sourceUrl"`
-	ProviderID       string            `json:"providerId"`
-	SourceIdentifier string            `json:"sourceIdentifier"`
-	Metadata         map[string]any    `json:"metadata,omitempty"`
-	Files            map[string]string `json:"files,omitempty"`
 }
 
 // ParseSkill parses a SKILL.md file from a reader.
