@@ -147,7 +147,7 @@ Instructions here.
 	}
 
 	want := &skills.Skill{Name: "test-skill", Description: "A test skill"}
-	opts := cmpopts.IgnoreFields(skills.Skill{}, "Metadata", "Body", "RawContent", "Path", "PluginName")
+	opts := cmpopts.IgnoreFields(skills.Skill{}, "Metadata", "RawFrontmatter", "Body", "RawContent", "Path", "PluginName")
 	if diff := cmp.Diff(want, got, opts); diff != "" {
 		t.Errorf("ParseSkillBytes mismatch (-want +got):\n%s", diff)
 	}
@@ -167,7 +167,7 @@ func TestSkillMarshalRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	opts := cmpopts.IgnoreFields(skills.Skill{}, "Metadata", "RawContent", "Path", "PluginName")
+	opts := cmpopts.IgnoreFields(skills.Skill{}, "Metadata", "RawFrontmatter", "RawContent", "Path", "PluginName")
 	if diff := cmp.Diff(original, got, opts); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
@@ -438,6 +438,321 @@ func TestIntegrationInstallVercelSkills(t *testing.T) {
 	}
 	if len(got.Skills) != n {
 		t.Errorf("expected %d skills in lock, got %d", n, len(got.Skills))
+	}
+}
+
+// --- OnParseError callback ---
+
+func TestDiscoverSkillsOnParseError(t *testing.T) {
+	tmp := t.TempDir()
+	// Create a skill with invalid frontmatter (missing description)
+	dir := filepath.Join(tmp, "skills", "bad-skill")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: bad\n---\n"), 0o644)
+
+	var parseErrors []string
+	opts := &skills.DiscoverOptions{
+		OnParseError: func(path string, err error) {
+			parseErrors = append(parseErrors, path+": "+err.Error())
+		},
+	}
+	discovered, err := skills.DiscoverSkills(tmp, "", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovered) != 0 {
+		t.Errorf("expected 0 valid skills, got %d", len(discovered))
+	}
+	if len(parseErrors) == 0 {
+		t.Error("expected parse error callback to be called")
+	}
+}
+
+// --- RawFrontmatter round-trip ---
+
+func TestSkillMarshalPreservesUnknownFields(t *testing.T) {
+	content := `---
+name: test-skill
+description: A test skill
+allowed-tools:
+  - bash
+  - read
+disable-model-invocation: true
+---
+
+# Test
+`
+	s, err := skills.ParseSkillBytes([]byte(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := s.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-parse and check unknown fields survived
+	reparsed, err := skills.ParseSkillBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reparsed.RawFrontmatter["disable-model-invocation"] != true {
+		t.Error("disable-model-invocation was lost in round-trip")
+	}
+	tools, ok := reparsed.RawFrontmatter["allowed-tools"]
+	if !ok {
+		t.Fatal("allowed-tools was lost in round-trip")
+	}
+	toolList, ok := tools.([]any)
+	if !ok || len(toolList) != 2 {
+		t.Errorf("allowed-tools unexpected value: %v", tools)
+	}
+}
+
+// --- RemoveSkill unknown agent guard ---
+
+func TestRemoveSkillUnknownAgent(t *testing.T) {
+	tmp := t.TempDir()
+	opts := &skills.InstallOptions{Cwd: tmp, HomeDir: t.TempDir(), Agents: skills.DefaultAgents(t.TempDir())}
+	err := skills.RemoveSkill("test", []skills.AgentType{"nonexistent-agent"}, opts)
+	if err == nil {
+		t.Error("expected error for unknown agent type")
+	}
+}
+
+// --- SkippedFiles in remote install ---
+
+func TestInstallRemoteSkillSkipsUnsafePaths(t *testing.T) {
+	projectDir := t.TempDir()
+	opts := testOpts(t, projectDir)
+	opts.Mode = skills.InstallCopy
+
+	rs := &skills.RemoteSkill{
+		Name:        "test-skill",
+		InstallName: "test-skill",
+		Files: map[string]string{
+			"SKILL.md":           "---\nname: test-skill\ndescription: test\n---\n",
+			"../escape/evil.txt": "pwned",
+		},
+	}
+
+	result := skills.InstallRemoteSkillForAgent(rs, skills.AgentClaudeCode, opts)
+	if !result.Success {
+		t.Fatalf("install failed: %s", result.Error)
+	}
+	if len(result.SkippedFiles) == 0 {
+		t.Error("expected skipped files for path traversal attempt")
+	}
+}
+
+// --- Hidden files are now copied ---
+
+func TestCopyPreservesHiddenFiles(t *testing.T) {
+	srcDir := t.TempDir()
+	skillDir := filepath.Join(srcDir, "skills", "dotfile-skill")
+	os.MkdirAll(skillDir, 0o755)
+	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: dotfile-skill\ndescription: test\n---\n"), 0o644)
+	os.WriteFile(filepath.Join(skillDir, ".env.example"), []byte("KEY=value"), 0o644)
+
+	discovered := mustDiscover(t, srcDir)
+	projectDir := t.TempDir()
+	opts := testOpts(t, projectDir)
+	opts.Mode = skills.InstallCopy
+
+	result := skills.InstallSkillForAgent(discovered[0], skills.AgentClaudeCode, opts)
+	if !result.Success {
+		t.Fatalf("install failed: %s", result.Error)
+	}
+
+	// .env.example should exist in the installed directory
+	if _, err := os.Stat(filepath.Join(result.Path, ".env.example")); err != nil {
+		t.Error(".env.example was not copied (hidden file exclusion too aggressive)")
+	}
+}
+
+// --- Err field ---
+
+func TestInstallResultErrField(t *testing.T) {
+	projectDir := t.TempDir()
+	opts := testOpts(t, projectDir)
+
+	skill := &skills.Skill{Name: "test", Description: "test", Path: "/nonexistent"}
+	result := skills.InstallSkillForAgent(skill, "nonexistent-agent", opts)
+	if result.Err == nil {
+		t.Error("expected Err to be non-nil for unknown agent")
+	}
+}
+
+// --- ResolveSkillInstallPath ---
+
+func TestResolveSkillInstallPath(t *testing.T) {
+	projectDir := t.TempDir()
+	opts := testOpts(t, projectDir)
+
+	path, err := skills.ResolveSkillInstallPath("My Skill", skills.AgentClaudeCode, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(path) {
+		t.Error("expected absolute path")
+	}
+	if filepath.Base(path) != "my-skill" {
+		t.Errorf("expected sanitized name 'my-skill', got %s", filepath.Base(path))
+	}
+}
+
+// --- OnDuplicate callback ---
+
+func TestDiscoverSkillsOnDuplicate(t *testing.T) {
+	tmp := t.TempDir()
+	writeSkill(t, tmp, "skills/my-skill", "my-skill", "First")
+	writeSkill(t, tmp, ".github/skills/my-skill", "my-skill", "Second")
+
+	var duplicates []string
+	opts := &skills.DiscoverOptions{
+		FullDepth: true,
+		OnDuplicate: func(name, path1, path2 string) {
+			duplicates = append(duplicates, name)
+		},
+	}
+	discovered, err := skills.DiscoverSkills(tmp, "", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovered) != 1 {
+		t.Errorf("expected 1 skill (first wins), got %d", len(discovered))
+	}
+	if len(duplicates) == 0 {
+		t.Error("expected duplicate callback to be called")
+	}
+}
+
+// --- ComputeFolderHash ---
+
+func TestComputeFolderHashTopLevel(t *testing.T) {
+	tmp := t.TempDir()
+	os.WriteFile(filepath.Join(tmp, "file.txt"), []byte("hello"), 0o644)
+
+	hash, err := skills.ComputeFolderHash(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hash == "" {
+		t.Error("hash should not be empty")
+	}
+}
+
+// --- RestoreFromProjectLock ---
+
+func TestRestoreFromProjectLock(t *testing.T) {
+	// Set up a source directory with skills
+	srcDir := t.TempDir()
+	writeSkill(t, srcDir, "skills/skill-a", "skill-a", "Skill A")
+	writeSkill(t, srcDir, "skills/skill-b", "skill-b", "Skill B")
+
+	// Install to get hashes
+	projectDir := t.TempDir()
+	opts := testOpts(t, projectDir)
+	opts.Mode = skills.InstallCopy
+	srcAbs, _ := filepath.Abs(srcDir)
+	source := skills.ParsedSource{Type: skills.SourceLocal, URL: srcAbs}
+	opts.Source = &source
+
+	discovered, _ := skills.DiscoverSkills(srcDir, "", nil)
+	lock := skills.NewProjectLock()
+	for _, skill := range discovered {
+		r := skills.InstallSkillForAgent(skill, skills.AgentClaudeCode, opts)
+		if !r.Success {
+			t.Fatalf("setup install failed: %s", r.Error)
+		}
+		hash, _ := skills.ComputeFolderHash(r.Path)
+		lock.SetSkill(skill.Name, skills.ProjectLockEntry{
+			Source:       srcAbs,
+			SourceType:   "local",
+			ComputedHash: hash,
+		})
+	}
+
+	// Now restore into a fresh project directory
+	restoreDir := t.TempDir()
+	restoreOpts := testOpts(t, restoreDir)
+	restoreOpts.Mode = skills.InstallCopy
+
+	results, err := skills.RestoreFromProjectLock(
+		context.Background(), lock,
+		[]skills.AgentType{skills.AgentClaudeCode}, restoreOpts,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	successCount := 0
+	for _, r := range results {
+		if r.Success {
+			successCount++
+		}
+	}
+	if successCount != 2 {
+		t.Errorf("expected 2 successful restores, got %d", successCount)
+	}
+
+	// Verify skills exist in restored directory
+	installed, _ := skills.ListInstalledSkills(restoreOpts)
+	if len(installed) != 2 {
+		t.Errorf("expected 2 installed skills after restore, got %d", len(installed))
+	}
+}
+
+// --- CheckProjectUpdates ---
+
+func TestCheckProjectUpdates(t *testing.T) {
+	srcDir := t.TempDir()
+	writeSkill(t, srcDir, "skills/my-skill", "my-skill", "Original")
+
+	// Compute hash of original
+	srcAbs, _ := filepath.Abs(srcDir)
+	hash, _ := skills.ComputeFolderHash(filepath.Join(srcDir, "skills/my-skill"))
+
+	lock := skills.NewProjectLock()
+	lock.SetSkill("my-skill", skills.ProjectLockEntry{
+		Source:       srcAbs,
+		SourceType:   "local",
+		ComputedHash: hash,
+	})
+
+	// No updates yet
+	updates, err := skills.CheckProjectUpdates(
+		context.Background(), lock,
+		&skills.InstallOptions{Cwd: t.TempDir()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) != 0 {
+		t.Errorf("expected 0 updates, got %d", len(updates))
+	}
+
+	// Modify the source skill
+	os.WriteFile(
+		filepath.Join(srcDir, "skills/my-skill/SKILL.md"),
+		[]byte("---\nname: my-skill\ndescription: Modified\n---\n\nUpdated content\n"),
+		0o644,
+	)
+
+	// Now should detect update
+	updates, err = skills.CheckProjectUpdates(
+		context.Background(), lock,
+		&skills.InstallOptions{Cwd: t.TempDir()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) != 1 {
+		t.Errorf("expected 1 update, got %d", len(updates))
+	}
+	if len(updates) > 0 && updates[0].Name != "my-skill" {
+		t.Errorf("expected update for my-skill, got %s", updates[0].Name)
 	}
 }
 

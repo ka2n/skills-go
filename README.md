@@ -26,7 +26,53 @@ go install github.com/ka2n/skills-go/cmd/skills@latest
 
 ## Library usage
 
-### Install a skill from GitHub
+### High-level API
+
+```go
+// Install all skills from a local directory
+results, _ := skills.InstallFromLocal("./my-skills",
+    []skills.AgentType{skills.AgentClaudeCode},
+    &skills.InstallFromLocalOptions{
+        InstallOptions: skills.InstallOptions{
+            Providers: &skills.Providers{Fetcher: &git.Fetcher{}},
+        },
+    },
+)
+
+// Restore from skills-lock.json (like npm install)
+lock, _ := skills.ReadProjectLock("skills-lock.json")
+results, _ = skills.RestoreFromProjectLock(ctx, lock,
+    []skills.AgentType{skills.AgentClaudeCode},
+    &skills.InstallOptions{
+        Providers: &skills.Providers{Fetcher: &git.Fetcher{}},
+    },
+)
+
+// Check for project skill updates (works with any git source)
+updates, _ := skills.CheckProjectUpdates(ctx, lock,
+    &skills.InstallOptions{
+        Providers: &skills.Providers{Fetcher: &git.Fetcher{}},
+    },
+)
+
+// Check for global skill updates
+globalLock, _ := skills.ReadGlobalLock(skills.GlobalLockPath(home))
+updates, _ = skills.CheckUpdates(ctx, globalLock,
+    &skills.InstallOptions{
+        Providers: &skills.Providers{
+            HashProvider: &github.HashProvider{Token: github.AutoToken()},
+        },
+    },
+)
+
+// Reconcile: compare discovered skills vs installed state
+statuses, _ := skills.ReconcileSkills(discovered, skills.AgentClaudeCode, opts)
+for _, st := range statuses {
+    fmt.Printf("%s installed=%v update=%v\n", st.Name, st.Installed, st.UpdateAvailable)
+}
+```
+
+### Low-level API
 
 ```go
 // 1. Parse source — "owner/repo" is resolved to a GitHub git URL
@@ -52,6 +98,29 @@ opts := &skills.InstallOptions{
 for _, s := range found {
     result := skills.InstallSkillForAgent(s, skills.AgentClaudeCode, opts)
     fmt.Println(result.Path)
+}
+```
+
+### Custom source parsers
+
+```go
+// Extend ParseSource to handle custom source formats (e.g. Azure DevOps)
+opts := &skills.InstallOptions{
+    Providers: &skills.Providers{
+        Fetcher: myFetcher,
+        SourceParsers: []skills.SourceParser{
+            func(input string) (skills.ParsedSource, bool, error) {
+                if strings.HasPrefix(input, "azdo:") {
+                    // Parse Azure DevOps shorthand
+                    return skills.ParsedSource{
+                        Type: "azdo",
+                        URL:  "https://dev.azure.com/...",
+                    }, true, nil
+                }
+                return skills.ParsedSource{}, false, nil
+            },
+        },
+    },
 }
 ```
 
@@ -83,6 +152,9 @@ skills add https://github.com/owner/repo  # full URL
 skills add ./local/path                   # local directory
 skills add https://example.com            # well-known endpoint
 
+skills install                            # restore from skills-lock.json
+skills install owner/repo                 # same as add
+
 skills list                               # list project skills
 skills list -g                            # list global skills
 skills list --json                        # JSON output
@@ -91,8 +163,10 @@ skills remove skill-name                  # remove by name
 
 skills init my-skill                      # create SKILL.md template
 
-skills check                              # check for updates
-skills update                             # update all skills
+skills check                              # check project skills for updates
+skills check -g                           # check global skills for updates
+skills update                             # update project skills
+skills update -g                          # update global skills
 ```
 
 ### Add options
@@ -208,11 +282,13 @@ Agents marked "Universal" share the `.agents/skills/` directory; others get syml
 github.com/ka2n/skills-go
 ├── skill.go           # SKILL.md parsing, Skill/RemoteSkill types
 ├── agent.go           # Agent definitions (45+ agents)
-├── source.go          # Source string parsing
+├── source.go          # Source string parsing (extensible via SourceParser)
 ├── discover.go        # Skill discovery (priority dirs + recursive)
 ├── installer.go       # Install (symlink/copy), list, remove
+├── highlevel.go       # High-level APIs (InstallFromLocal, CheckUpdates, Restore, Reconcile)
+├── hash.go            # Folder/content hashing (SHA-256)
 ├── lock.go            # Lock file read/write (global v3, project v1)
-├── provider.go        # Fetcher/HostProvider/HashProvider interfaces
+├── provider.go        # Fetcher/HashProvider/Providers interfaces
 ├── plugin.go          # .claude-plugin manifest support
 ├── init.go            # SKILL.md template generation
 ├── provider/
@@ -230,6 +306,14 @@ github.com/ka2n/skills-go
 Git is not a hard dependency. Core interfaces allow any backend:
 
 ```go
+// Bundle all providers for high-level APIs
+type Providers struct {
+    Fetcher       Fetcher        // retrieves skills from git-based sources
+    HashProvider  HashProvider   // checks remote hashes for global update detection
+    HostProviders *ProviderRegistry
+    SourceParsers []SourceParser // custom source format parsers
+}
+
 type Fetcher interface {
     Fetch(ctx context.Context, source ParsedSource) (localDir string, cleanup func(), err error)
 }
@@ -238,11 +322,8 @@ type HashProvider interface {
     FetchFolderHash(ctx context.Context, ownerRepo, skillPath string) (string, error)
 }
 
-type HostProvider interface {
-    FetchSkill(ctx context.Context, url string) (*RemoteSkill, error)
-    FetchAllSkills(ctx context.Context, url string) ([]*RemoteSkill, error)
-    // ...
-}
+// Extend source parsing for custom formats (Azure DevOps, Bitbucket, etc.)
+type SourceParser func(input string) (ParsedSource, bool, error)
 ```
 
 Built-in providers:
@@ -254,8 +335,6 @@ Built-in providers:
 | `provider/local` | `Fetcher` | Local filesystem path | nothing |
 | `provider/github` | `HashProvider` | GitHub Trees API (update check) | nothing |
 | `provider/wellknown` | `HostProvider` | RFC 8615 well-known endpoint | nothing |
-
-Built-in: `provider/github.HashProvider` (GitHub Trees API with lazy token resolution).
 
 ## Lock file format
 
