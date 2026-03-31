@@ -14,6 +14,11 @@ import (
 // Files are sorted by relative path for deterministic output.
 // Directories named .git and node_modules are skipped.
 func ComputeFolderHash(dir string) (string, error) {
+	// Resolve symlinks so filepath.WalkDir traverses the target directory.
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+
 	type fileEntry struct {
 		relativePath string
 		content      []byte

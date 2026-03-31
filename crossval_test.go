@@ -24,9 +24,11 @@ func TestCrossValidationNpxVsGo(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not available")
 	}
-	skillsBin, err := exec.LookPath("skills")
-	if err != nil {
-		t.Skip("skills binary not available; run 'go install ./cmd/skills/' first")
+
+	// Build the Go CLI from source to avoid picking up an npx-installed "skills" binary.
+	skillsBin := filepath.Join(t.TempDir(), "skills")
+	if out, err := exec.Command("go", "build", "-o", skillsBin, "./cmd/skills/").CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/skills/ failed: %v\n%s", err, out)
 	}
 
 	source := "vercel-labs/agent-skills"

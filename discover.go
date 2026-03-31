@@ -1,7 +1,9 @@
 package skills
 
 import (
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -36,9 +38,35 @@ func DiscoverSkills(basePath string, subpath string, opts *DiscoverOptions) ([]*
 		return nil, &PathTraversalError{Subpath: subpath}
 	}
 
-	searchPath := basePath
+	root, err := os.OpenRoot(basePath)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+
+	skills, err := DiscoverSkillsFS(root.FS(), subpath, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert FS-relative paths back to absolute OS paths.
+	for _, s := range skills {
+		s.Path = filepath.Join(basePath, filepath.FromSlash(s.Path))
+	}
+	return skills, nil
+}
+
+// DiscoverSkillsFS finds all SKILL.md files in the given fs.FS.
+// Paths within the FS use forward slashes (path.Join). Skill.Path is set to
+// the FS-relative path (e.g. "skills/my-skill").
+func DiscoverSkillsFS(fsys fs.FS, subpath string, opts *DiscoverOptions) ([]*Skill, error) {
+	if opts == nil {
+		opts = &DiscoverOptions{}
+	}
+
+	searchPath := "."
 	if subpath != "" {
-		searchPath = filepath.Join(basePath, subpath)
+		searchPath = subpath
 	}
 
 	var skills []*Skill
@@ -61,31 +89,31 @@ func DiscoverSkills(basePath string, subpath string, opts *DiscoverOptions) ([]*
 		skills = append(skills, s)
 	}
 
-	tryParse := func(path string) *Skill {
-		s, err := parseSkillMd(path)
+	tryParse := func(skillMdPath string) *Skill {
+		s, err := parseSkillMdFS(fsys, skillMdPath)
 		if err != nil && opts.OnParseError != nil {
-			opts.OnParseError(path, err)
+			opts.OnParseError(skillMdPath, err)
 		}
 		return s
 	}
 
 	// If pointing directly at a skill directory
-	if hasSkillMd(searchPath) {
-		addSkill(tryParse(filepath.Join(searchPath, "SKILL.md")))
+	if hasSkillMdFS(fsys, searchPath) {
+		addSkill(tryParse(path.Join(searchPath, "SKILL.md")))
 		if !opts.FullDepth {
 			return skills, nil
 		}
 	}
 
 	// Build priority search directories from agent configs + well-known locations
-	priorityDirs := skillSearchDirs(searchPath, opts.Agents)
+	priorityDirs := skillSearchDirsFS(searchPath, opts.Agents)
 
-	// Add plugin manifest paths
-	pluginPaths := getPluginSkillPaths(searchPath)
+	// Add plugin manifest paths (.claude-plugin/marketplace.json, plugin.json)
+	pluginPaths := getPluginSkillPathsFS(fsys, searchPath)
 	priorityDirs = append(priorityDirs, pluginPaths...)
 
 	for _, dir := range priorityDirs {
-		entries, err := os.ReadDir(dir)
+		entries, err := fs.ReadDir(fsys, dir)
 		if err != nil {
 			continue
 		}
@@ -93,18 +121,18 @@ func DiscoverSkills(basePath string, subpath string, opts *DiscoverOptions) ([]*
 			if !entry.IsDir() {
 				continue
 			}
-			skillDir := filepath.Join(dir, entry.Name())
-			if hasSkillMd(skillDir) {
-				addSkill(tryParse(filepath.Join(skillDir, "SKILL.md")))
+			skillDir := path.Join(dir, entry.Name())
+			if hasSkillMdFS(fsys, skillDir) {
+				addSkill(tryParse(path.Join(skillDir, "SKILL.md")))
 			}
 		}
 	}
 
 	// Fallback to recursive search if nothing found, or if fullDepth
 	if len(skills) == 0 || opts.FullDepth {
-		allDirs := findSkillDirs(searchPath, 0, 5)
+		allDirs := findSkillDirsFS(fsys, searchPath, 0, 5)
 		for _, dir := range allDirs {
-			addSkill(tryParse(filepath.Join(dir, "SKILL.md")))
+			addSkill(tryParse(path.Join(dir, "SKILL.md")))
 		}
 	}
 
@@ -161,13 +189,52 @@ func skillSearchDirs(searchPath string, agents map[AgentType]AgentConfig) []stri
 	return dirs
 }
 
+// skillSearchDirsFS returns directories to search for skills within an fs.FS,
+// using forward-slash paths (path.Join).
+func skillSearchDirsFS(searchPath string, agents map[AgentType]AgentConfig) []string {
+	if agents == nil {
+		agents = DefaultAgents(UserHomeDir())
+	}
+
+	seen := map[string]bool{}
+	var dirs []string
+	add := func(d string) {
+		if seen[d] {
+			return
+		}
+		seen[d] = true
+		dirs = append(dirs, d)
+	}
+
+	add(searchPath)
+
+	add(path.Join(searchPath, "skills"))
+	add(path.Join(searchPath, "skills/.curated"))
+	add(path.Join(searchPath, "skills/.experimental"))
+	add(path.Join(searchPath, "skills/.system"))
+	add(path.Join(searchPath, ".github/skills"))
+
+	for _, cfg := range agents {
+		// cfg.SkillsDir uses OS separators; convert to forward slashes for FS
+		add(path.Join(searchPath, filepath.ToSlash(cfg.SkillsDir)))
+	}
+
+	return dirs
+}
+
 func hasSkillMd(dir string) bool {
 	info, err := os.Stat(filepath.Join(dir, "SKILL.md"))
 	return err == nil && !info.IsDir()
 }
 
-func parseSkillMd(path string) (*Skill, error) {
-	data, err := os.ReadFile(path)
+func hasSkillMdFS(fsys fs.FS, dir string) bool {
+	p := path.Join(dir, "SKILL.md")
+	info, err := fs.Stat(fsys, p)
+	return err == nil && !info.IsDir()
+}
+
+func parseSkillMd(fpath string) (*Skill, error) {
+	data, err := os.ReadFile(fpath)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +242,21 @@ func parseSkillMd(path string) (*Skill, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.Path = filepath.Dir(path)
+	s.Path = filepath.Dir(fpath)
+	s.RawContent = string(data)
+	return s, nil
+}
+
+func parseSkillMdFS(fsys fs.FS, skillMdPath string) (*Skill, error) {
+	data, err := fs.ReadFile(fsys, skillMdPath)
+	if err != nil {
+		return nil, err
+	}
+	s, err := ParseSkillBytes(data)
+	if err != nil {
+		return nil, err
+	}
+	s.Path = path.Dir(skillMdPath)
 	s.RawContent = string(data)
 	return s, nil
 }
@@ -197,6 +278,27 @@ func findSkillDirs(dir string, depth, maxDepth int) []string {
 			continue
 		}
 		result = append(result, findSkillDirs(filepath.Join(dir, entry.Name()), depth+1, maxDepth)...)
+	}
+	return result
+}
+
+func findSkillDirsFS(fsys fs.FS, dir string, depth, maxDepth int) []string {
+	if depth > maxDepth {
+		return nil
+	}
+	var result []string
+	if hasSkillMdFS(fsys, dir) {
+		result = append(result, dir)
+	}
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return result
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || skipDirs[entry.Name()] {
+			continue
+		}
+		result = append(result, findSkillDirsFS(fsys, path.Join(dir, entry.Name()), depth+1, maxDepth)...)
 	}
 	return result
 }

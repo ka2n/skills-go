@@ -49,6 +49,11 @@ type InstallOptions struct {
 	HomeDir string
 	Mode    InstallMode
 	Agents  map[AgentType]AgentConfig
+	// SourceFS is the source filesystem for reading skill files.
+	// When set, skill.Path is treated as an FS-relative path and files are read
+	// from SourceFS instead of the OS filesystem. Writing still goes to the OS.
+	// If nil, skill.Path is treated as an OS absolute path (backward compat).
+	SourceFS fs.FS
 	// Source is the parsed source used for this install, used to populate lock entries in InstallResult.
 	Source *ParsedSource
 	// FetchRoot is the root directory of the fetched source (e.g. the clone directory).
@@ -201,15 +206,23 @@ func InstallSkillForAgent(skill *Skill, agentType AgentType, opts *InstallOption
 		return r
 	}
 
+	// Choose copy function based on whether SourceFS is set
+	copyDir := func(src, dest string) error {
+		if opts.SourceFS != nil {
+			return cleanAndCopyDirFS(opts.SourceFS, src, dest)
+		}
+		return cleanAndCopyDir(src, dest)
+	}
+
 	if mode == InstallCopy {
-		if err := cleanAndCopyDir(skill.Path, agentDir); err != nil {
+		if err := copyDir(skill.Path, agentDir); err != nil {
 			return installError(err.Error(), mode)
 		}
 		return buildResult(agentDir, "", InstallCopy, false)
 	}
 
 	// Symlink mode
-	if err := cleanAndCopyDir(skill.Path, canonicalDir); err != nil {
+	if err := copyDir(skill.Path, canonicalDir); err != nil {
 		return installError(err.Error(), mode)
 	}
 
@@ -220,7 +233,7 @@ func InstallSkillForAgent(skill *Skill, agentType AgentType, opts *InstallOption
 
 	if err := createSymlink(canonicalDir, agentDir); err != nil {
 		// Fallback to copy
-		if err := cleanAndCopyDir(skill.Path, agentDir); err != nil {
+		if err := copyDir(skill.Path, agentDir); err != nil {
 			return installError(err.Error(), mode)
 		}
 		return buildResult(agentDir, canonicalDir, InstallSymlink, true)
@@ -657,7 +670,7 @@ func copyDirectory(src, dest string) error {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -672,12 +685,91 @@ func copyDirectory(src, dest string) error {
 			return nil
 		}
 
-		rel, _ := filepath.Rel(src, path)
+		rel, _ := filepath.Rel(src, p)
 		destPath := filepath.Join(dest, rel)
 		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 			return err
 		}
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(destPath, data, 0o644)
+	})
+}
+
+// cleanAndCopyDirFS copies a directory from an fs.FS source to an OS destination,
+// using the same atomic-swap strategy as cleanAndCopyDir.
+func cleanAndCopyDirFS(fsys fs.FS, src, dest string) error {
+	parent := filepath.Dir(dest)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return err
+	}
+	tmpNew, err := os.MkdirTemp(parent, ".skill-install-*")
+	if err != nil {
+		return fmt.Errorf("creating temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpNew)
+
+	if err := copyDirectoryFS(fsys, src, tmpNew); err != nil {
+		return err
+	}
+
+	tmpOld := dest + ".old"
+	hasOld := false
+	if _, err := os.Stat(dest); err == nil {
+		if err := os.Rename(dest, tmpOld); err != nil {
+			os.RemoveAll(dest)
+		} else {
+			hasOld = true
+		}
+	}
+
+	if err := os.Rename(tmpNew, dest); err != nil {
+		if hasOld {
+			os.Rename(tmpOld, dest)
+		}
+		return fmt.Errorf("rename: %w", err)
+	}
+
+	if hasOld {
+		os.RemoveAll(tmpOld)
+	}
+	return nil
+}
+
+// copyDirectoryFS copies files from an fs.FS source path to an OS destination.
+// Source paths use forward slashes; destination paths use OS separators.
+func copyDirectoryFS(fsys fs.FS, src, dest string) error {
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return err
+	}
+	return fs.WalkDir(fsys, src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if excludeDirs[name] {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if excludeFiles[name] {
+			return nil
+		}
+
+		// p is a forward-slash FS path; compute relative to src
+		rel := strings.TrimPrefix(p, src)
+		rel = strings.TrimPrefix(rel, "/")
+		if rel == "" {
+			return nil
+		}
+		destPath := filepath.Join(dest, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			return err
+		}
+		data, err := fs.ReadFile(fsys, p)
 		if err != nil {
 			return err
 		}
