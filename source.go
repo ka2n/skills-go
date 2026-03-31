@@ -28,6 +28,12 @@ type ParsedSource struct {
 	SkillFilter string
 }
 
+// SourceParser is a function that attempts to parse a source string.
+// It returns a ParsedSource and true if the input was recognized, or false if not.
+// Custom parsers are tried before the built-in logic, allowing extension
+// for formats like Azure DevOps, Bitbucket shorthand, etc.
+type SourceParser func(input string) (ParsedSource, bool, error)
+
 // sourceAliases maps common shorthand to canonical source.
 var sourceAliases = map[string]string{
 	"coinbase/agentWallet": "coinbase/agentic-wallet-skills",
@@ -36,6 +42,23 @@ var sourceAliases = map[string]string{
 // ParseSource parses a source string into a structured format.
 // Supports: local paths, GitHub URLs/shorthand, GitLab URLs, well-known URLs, git URLs.
 func ParseSource(input string) (ParsedSource, error) {
+	return ParseSourceWith(input, nil)
+}
+
+// ParseSourceWith parses a source string, trying custom parsers first.
+// Custom parsers are invoked in order before the built-in logic.
+func ParseSourceWith(input string, parsers []SourceParser) (ParsedSource, error) {
+	// Try custom parsers first
+	for _, p := range parsers {
+		ps, ok, err := p(input)
+		if err != nil {
+			return ParsedSource{}, err
+		}
+		if ok {
+			return ps, nil
+		}
+	}
+
 	if alias, ok := sourceAliases[input]; ok {
 		input = alias
 	}

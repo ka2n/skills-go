@@ -67,3 +67,41 @@ type HashProvider interface {
 	// ownerRepo is "owner/repo", skillPath is the path within the repo.
 	FetchFolderHash(ctx context.Context, ownerRepo string, skillPath string) (string, error)
 }
+
+// Providers bundles the provider interfaces needed by high-level APIs.
+// All fields are optional; nil fields cause the corresponding functionality
+// to be skipped or use defaults.
+type Providers struct {
+	// Fetcher retrieves skills from git-based sources.
+	Fetcher Fetcher
+	// HashProvider checks remote hashes for global skill update detection.
+	HashProvider HashProvider
+	// HostProviders is the registry for well-known endpoint providers.
+	HostProviders *ProviderRegistry
+	// SourceParsers are custom source parsers tried before built-in logic.
+	// Use this to support source formats not handled by ParseSource
+	// (e.g. Azure DevOps, Bitbucket shorthand, self-hosted GitLab).
+	SourceParsers []SourceParser
+}
+
+// parseSource is a convenience that routes through custom parsers if configured.
+func (p *Providers) parseSource(input string) (ParsedSource, error) {
+	if p == nil {
+		return ParseSource(input)
+	}
+	return ParseSourceWith(input, p.SourceParsers)
+}
+
+func (p *Providers) fetcher() Fetcher {
+	if p == nil {
+		return nil
+	}
+	return p.Fetcher
+}
+
+func (p *Providers) hashProvider() HashProvider {
+	if p == nil {
+		return nil
+	}
+	return p.HashProvider
+}
