@@ -13,7 +13,6 @@ import (
 	skills "github.com/ka2n/skills-go"
 	"github.com/ka2n/skills-go/provider/git"
 	"github.com/ka2n/skills-go/provider/github"
-	"github.com/ka2n/skills-go/provider/local"
 	"github.com/ka2n/skills-go/provider/wellknown"
 )
 
@@ -30,8 +29,15 @@ func main() {
 	rest := args[1:]
 
 	switch cmd {
-	case "add", "a", "install", "i":
+	case "add", "a":
 		cmdAdd(rest)
+	case "install", "i":
+		// With source arg: same as add. Without: restore from lock.
+		if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+			cmdAdd(rest)
+		} else {
+			cmdInstall(rest)
+		}
 	case "remove", "rm", "r":
 		cmdRemove(rest)
 	case "list", "ls":
@@ -59,6 +65,7 @@ func showBanner() {
 	dim := "\033[2m"
 	reset := "\033[0m"
 	fmt.Printf("  %s$%s skills add <source>       %sAdd skills%s\n", dim, reset, dim, reset)
+	fmt.Printf("  %s$%s skills install             %sRestore from skills-lock.json%s\n", dim, reset, dim, reset)
 	fmt.Printf("  %s$%s skills remove              %sRemove skills%s\n", dim, reset, dim, reset)
 	fmt.Printf("  %s$%s skills list                %sList installed skills%s\n", dim, reset, dim, reset)
 	fmt.Printf("  %s$%s skills init [name]         %sCreate a new skill%s\n", dim, reset, dim, reset)
@@ -72,13 +79,14 @@ func showHelp() {
 
 Manage Skills:
   add <source>         Add skills from a source (GitHub, GitLab, local path, URL)
+  install              Restore skills from skills-lock.json (or add with source)
   remove [skills]      Remove installed skills
   list, ls             List installed skills
   init [name]          Create a new SKILL.md template
 
 Updates:
-  check                Check for available skill updates
-  update               Update all skills to latest versions
+  check                Check for available skill updates (project by default, -g for global)
+  update               Update skills to latest versions (project by default, -g for global)
 
 Add Options:
   -g, --global           Install globally (~/  ) instead of project-level
@@ -309,6 +317,7 @@ func installGit(ctx context.Context, parsed skills.ParsedSource, source string, 
 		os.Exit(1)
 	}
 	defer cleanup()
+	installOpts.FetchRoot = localDir
 
 	discovered, err := skills.DiscoverSkills(localDir, parsed.Subpath, &skills.DiscoverOptions{
 		FullDepth:       opts.fullDepth,
@@ -348,73 +357,89 @@ func filterByOpts(discovered []*skills.Skill, opts addOptions) []*skills.Skill {
 func installSkills(toInstall []*skills.Skill, targetAgents []skills.AgentType, installOpts *skills.InstallOptions, parsed skills.ParsedSource, source string) {
 	cwd, _ := os.Getwd()
 
-	// Lock files
-	var globalLock *skills.GlobalLock
-	var projectLock *skills.ProjectLock
-	if installOpts.Global {
-		globalLock, _ = skills.ReadGlobalLock(skills.GlobalLockPath(homeDir()))
-	} else {
-		projectLock, _ = skills.ReadProjectLock(skills.ProjectLockPath(cwd))
-	}
+	// Set source on install options for lock entry population
+	installOpts.Source = &parsed
 
-	ownerRepo := skills.GetOwnerRepo(parsed)
-	sourceType := string(parsed.Type)
+	var allResults []skills.InstallResult
 
 	for _, skill := range toInstall {
 		fmt.Printf("Installing %s...\n", skill.Name)
 		for _, agent := range targetAgents {
 			result := skills.InstallSkillForAgent(skill, agent, installOpts)
+			allResults = append(allResults, result)
 			if result.Success {
 				fmt.Printf("  ✓ %s → %s\n", agent, result.Path)
 			} else if result.Error != "" {
 				fmt.Printf("  ✗ %s: %s\n", agent, result.Error)
 			}
 		}
-
-		// Update lock files
-		if installOpts.Global && globalLock != nil {
-			lockSource := ownerRepo
-			if lockSource == "" {
-				lockSource = source
-			}
-			globalLock.SetSkill(skill.Name, skills.GlobalLockEntry{
-				Source:     lockSource,
-				SourceType: sourceType,
-				SourceURL:  parsed.URL,
-				SkillPath:  filepath.Join(skill.Path, "SKILL.md"),
-			})
-		}
-		if !installOpts.Global && projectLock != nil {
-			lockSource := ownerRepo
-			if lockSource == "" {
-				lockSource = source
-			}
-			hash := ""
-			if skill.Path != "" {
-				hash, _ = local.ComputeFolderHash(skill.Path)
-			}
-			projectLock.SetSkill(skill.Name, skills.ProjectLockEntry{
-				Source:       lockSource,
-				SourceType:   sourceType,
-				ComputedHash: hash,
-			})
-		}
 	}
 
-	// Write lock files
-	if installOpts.Global && globalLock != nil {
-		if err := globalLock.Write(skills.GlobalLockPath(homeDir())); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not write global lock: %v\n", err)
-		}
-	}
-	if !installOpts.Global && projectLock != nil {
-		if err := projectLock.Write(skills.ProjectLockPath(cwd)); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not write project lock: %v\n", err)
-		}
+	// Write lock files using high-level API
+	if err := skills.WriteLockEntries(allResults, homeDir(), cwd); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not write lock: %v\n", err)
 	}
 
 	fmt.Println()
 	fmt.Printf("✓ Installed %d skill(s)\n", len(toInstall))
+}
+
+// --- Install command (no source = restore from lock) ---
+
+func cmdInstall(_ []string) {
+	cwd, _ := os.Getwd()
+	lockPath := skills.ProjectLockPath(cwd)
+	lock, err := skills.ReadProjectLock(lockPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", lockPath, err)
+		os.Exit(1)
+	}
+
+	if len(lock.Skills) == 0 {
+		fmt.Println("No skills found in skills-lock.json")
+		fmt.Println("Add skills with: skills add <source>")
+		return
+	}
+
+	fmt.Printf("Restoring %d skill(s) from skills-lock.json...\n", len(lock.Skills))
+
+	allAgents := skills.DefaultAgents(homeDir())
+	targetAgents := skills.DetectInstalledAgents(allAgents)
+	if len(targetAgents) == 0 {
+		targetAgents = skills.UniversalAgents(allAgents)
+	}
+
+	installOpts := &skills.InstallOptions{
+		Cwd:    cwd,
+		Agents: allAgents,
+		Providers: &skills.Providers{Fetcher: &git.Fetcher{}},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	results, err := skills.RestoreFromProjectLock(ctx, lock, targetAgents, installOpts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	successCount := 0
+	for _, r := range results {
+		if r.Success {
+			successCount++
+			fmt.Printf("  ✓ %s → %s\n", r.SkillName, r.Path)
+		} else if r.Error != "" {
+			fmt.Printf("  ✗ %s: %s\n", r.SkillName, r.Error)
+		}
+	}
+
+	// Update lock with new hashes
+	if err := skills.WriteLockEntries(results, homeDir(), cwd); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not write lock: %v\n", err)
+	}
+
+	fmt.Printf("\n✓ Restored %d skill(s)\n", successCount)
 }
 
 func printSkills(discovered []*skills.Skill) {
@@ -502,13 +527,19 @@ func cmdRemove(args []string) {
 		}
 	}
 
-	// Update lock file
+	// Update lock files
 	if global {
 		lock, _ := skills.ReadGlobalLock(skills.GlobalLockPath(homeDir()))
 		for _, name := range toRemove {
 			lock.RemoveSkill(name)
 		}
 		lock.Write(skills.GlobalLockPath(homeDir()))
+	} else {
+		lock, _ := skills.ReadProjectLock(skills.ProjectLockPath(cwd))
+		for _, name := range toRemove {
+			lock.RemoveSkill(name)
+		}
+		lock.Write(skills.ProjectLockPath(cwd))
 	}
 }
 
@@ -632,105 +663,169 @@ func cmdInit(args []string) {
 
 // --- Check command ---
 
-func cmdCheck(_ []string) {
-	lock, err := skills.ReadGlobalLock(skills.GlobalLockPath(homeDir()))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading lock: %v\n", err)
-		os.Exit(1)
+func cmdCheck(args []string) {
+	var global bool
+	for _, arg := range args {
+		if arg == "-g" || arg == "--global" {
+			global = true
+		}
 	}
 
-	if len(lock.Skills) == 0 {
-		fmt.Println("No skills tracked in lock file.")
+	ctx := context.Background()
+
+	if global {
+		lock, err := skills.ReadGlobalLock(skills.GlobalLockPath(homeDir()))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading global lock: %v\n", err)
+			os.Exit(1)
+		}
+		if len(lock.Skills) == 0 {
+			fmt.Println("No global skills tracked.")
+			return
+		}
+		fmt.Println("Checking global skills for updates...")
+		updates, err := skills.CheckUpdates(ctx, lock, &skills.InstallOptions{
+			Providers: &skills.Providers{HashProvider: &github.HashProvider{Token: github.AutoToken()}},
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if len(updates) == 0 {
+			fmt.Println("✓ All global skills are up to date")
+		} else {
+			fmt.Printf("%d update(s) available:\n", len(updates))
+			for _, u := range updates {
+				fmt.Printf("  ↑ %s\n", u.Name)
+			}
+			fmt.Println("\nRun skills update -g to update")
+		}
 		return
 	}
 
-	fmt.Println("Checking for updates...")
-	ctx := context.Background()
-	hp := &github.HashProvider{Token: github.AutoToken()}
-
-	var updates []string
-	for name, entry := range lock.Skills {
-		if entry.SkillFolderHash == "" || entry.SkillPath == "" {
-			continue
-		}
-		ownerRepo := entry.Source
-		hash, err := hp.FetchFolderHash(ctx, ownerRepo, entry.SkillPath)
-		if err != nil {
-			continue
-		}
-		if hash != entry.SkillFolderHash {
-			updates = append(updates, name)
-		}
+	// Project scope (default)
+	cwd, _ := os.Getwd()
+	lock, err := skills.ReadProjectLock(skills.ProjectLockPath(cwd))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading project lock: %v\n", err)
+		os.Exit(1)
 	}
-
+	if len(lock.Skills) == 0 {
+		fmt.Println("No project skills tracked in skills-lock.json")
+		return
+	}
+	fmt.Println("Checking project skills for updates...")
+	updates, err := skills.CheckProjectUpdates(ctx, lock, &skills.InstallOptions{
+		Cwd:       cwd,
+		Providers: &skills.Providers{Fetcher: &git.Fetcher{}},
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	if len(updates) == 0 {
-		fmt.Println("✓ All skills are up to date")
+		fmt.Println("✓ All project skills are up to date")
 	} else {
 		fmt.Printf("%d update(s) available:\n", len(updates))
-		for _, name := range updates {
-			fmt.Printf("  ↑ %s\n", name)
+		for _, u := range updates {
+			fmt.Printf("  ↑ %s\n", u.Name)
 		}
-		fmt.Println("\nRun skills update to update all skills")
+		fmt.Println("\nRun skills update to update")
 	}
 }
 
 // --- Update command ---
 
-func cmdUpdate(_ []string) {
-	lock, err := skills.ReadGlobalLock(skills.GlobalLockPath(homeDir()))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading lock: %v\n", err)
-		os.Exit(1)
+func cmdUpdate(args []string) {
+	var global bool
+	for _, arg := range args {
+		if arg == "-g" || arg == "--global" {
+			global = true
+		}
 	}
 
-	if len(lock.Skills) == 0 {
-		fmt.Println("No skills tracked in lock file.")
-		return
-	}
-
-	fmt.Println("Checking for updates...")
 	ctx := context.Background()
-	hp := &github.HashProvider{Token: github.AutoToken()}
-
-	type updateEntry struct {
-		name  string
-		entry skills.GlobalLockEntry
-	}
-	var updates []updateEntry
-
-	for name, entry := range lock.Skills {
-		if entry.SkillFolderHash == "" || entry.SkillPath == "" {
-			continue
-		}
-		hash, err := hp.FetchFolderHash(ctx, entry.Source, entry.SkillPath)
-		if err != nil {
-			continue
-		}
-		if hash != entry.SkillFolderHash {
-			updates = append(updates, updateEntry{name: name, entry: entry})
-		}
-	}
-
-	if len(updates) == 0 {
-		fmt.Println("✓ All skills are up to date")
-		return
-	}
-
-	fmt.Printf("Found %d update(s)\n", len(updates))
 	allAgents := skills.DefaultAgents(homeDir())
 	targetAgents := skills.DetectInstalledAgents(allAgents)
 	if len(targetAgents) == 0 {
 		targetAgents = []skills.AgentType{skills.AgentClaudeCode}
 	}
 
-	successCount := 0
-	for _, u := range updates {
-		fmt.Printf("Updating %s...\n", u.name)
-		// Re-install from source
-		cmdAddArgs := []string{u.entry.SourceURL, "-g", "-y", "--skill", u.name}
-		cmdAdd(cmdAddArgs)
-		successCount++
+	fmt.Println("Checking for updates...")
+
+	if global {
+		lock, err := skills.ReadGlobalLock(skills.GlobalLockPath(homeDir()))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading global lock: %v\n", err)
+			os.Exit(1)
+		}
+		if len(lock.Skills) == 0 {
+			fmt.Println("No global skills tracked.")
+			return
+		}
+		results, err := skills.UpdateAll(ctx, lock, targetAgents, &skills.InstallOptions{
+			Global: true,
+			Agents: allAgents,
+			Providers: &skills.Providers{
+				Fetcher:      &git.Fetcher{},
+				HashProvider: &github.HashProvider{Token: github.AutoToken()},
+			},
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if len(results) == 0 {
+			fmt.Println("✓ All global skills are up to date")
+			return
+		}
+		successCount := 0
+		for _, r := range results {
+			if r.Success {
+				successCount++
+				fmt.Printf("  ✓ %s\n", r.SkillName)
+			}
+		}
+		if err := lock.Write(skills.GlobalLockPath(homeDir())); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not write lock: %v\n", err)
+		}
+		fmt.Printf("\n✓ Updated %d skill(s)\n", successCount)
+		return
 	}
 
+	// Project scope (default)
+	cwd, _ := os.Getwd()
+	lock, err := skills.ReadProjectLock(skills.ProjectLockPath(cwd))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading project lock: %v\n", err)
+		os.Exit(1)
+	}
+	if len(lock.Skills) == 0 {
+		fmt.Println("No project skills tracked in skills-lock.json")
+		return
+	}
+	results, err := skills.UpdateProject(ctx, lock, targetAgents, &skills.InstallOptions{
+		Cwd:       cwd,
+		Agents:    allAgents,
+		Providers: &skills.Providers{Fetcher: &git.Fetcher{}},
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if len(results) == 0 {
+		fmt.Println("✓ All project skills are up to date")
+		return
+	}
+	successCount := 0
+	for _, r := range results {
+		if r.Success {
+			successCount++
+			fmt.Printf("  ✓ %s\n", r.SkillName)
+		}
+	}
+	if err := lock.Write(skills.ProjectLockPath(cwd)); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not write lock: %v\n", err)
+	}
 	fmt.Printf("\n✓ Updated %d skill(s)\n", successCount)
 }
