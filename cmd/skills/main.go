@@ -787,17 +787,11 @@ func cmdUpdate(args []string) {
 			fmt.Println("✓ All global skills are up to date")
 			return
 		}
-		successCount := 0
-		for _, r := range results {
-			if r.Success {
-				successCount++
-				fmt.Printf("  ✓ %s\n", r.SkillName)
-			}
-		}
+		updated := printUpdateResults(results)
 		if err := lock.Write(skills.GlobalLockPath(homeDir())); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not write lock: %v\n", err)
 		}
-		fmt.Printf("\n✓ Updated %d skill(s)\n", successCount)
+		fmt.Printf("\n✓ Updated %d skill(s)\n", updated)
 		return
 	}
 
@@ -825,15 +819,20 @@ func cmdUpdate(args []string) {
 		fmt.Println("✓ All project skills are up to date")
 		return
 	}
-	successCount := 0
-	for _, r := range results {
-		if r.Success {
-			successCount++
-			fmt.Printf("  ✓ %s\n", r.SkillName)
-		}
-	}
+	updated := printUpdateResults(results)
 	if err := lock.Write(skills.ProjectLockPath(cwd)); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not write lock: %v\n", err)
 	}
-	fmt.Printf("\n✓ Updated %d skill(s)\n", successCount)
+	fmt.Printf("\n✓ Updated %d skill(s)\n", updated)
+}
+
+func printUpdateResults(results []skills.InstallResult) int {
+	seen := map[string]bool{}
+	for _, r := range results {
+		if r.Success && !seen[r.SkillName] {
+			seen[r.SkillName] = true
+			fmt.Printf("  ✓ %s\n", r.SkillName)
+		}
+	}
+	return len(seen)
 }
